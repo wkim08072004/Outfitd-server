@@ -47,9 +47,11 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
 
       case 'checkout.session.completed': {
         const session = event.data.object;
+
+        // Subscription checkout
         if (session.mode === 'subscription') {
           // Award bonus Style Points on first subscription
-          const userId = session.metadata.userId;
+          const userId = session.metadata.outfitd_user_id;
           if (userId) {
             const { data: user } = await supabase.from('users').select('store_credits').eq('id', userId).single();
             if (user) {
@@ -61,6 +63,65 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
             }
           }
         }
+
+        // Marketplace order payment completed
+        if (session.mode === 'payment' && session.metadata && session.metadata.order_id) {
+          const orderId = session.metadata.order_id;
+          const orderNumber = session.metadata.order_number;
+
+          // Update order status
+          await supabase.from('orders').update({
+            status: 'awaiting_fulfillment',
+            stripe_payment_intent_id: session.payment_intent,
+            updated_at: new Date().toISOString(),
+            hold_until: new Date(Date.now() + 75 * 24 * 60 * 60 * 1000).toISOString(),
+          }).eq('id', orderId);
+
+          // Award Style Points for purchase
+          const { data: order } = await supabase.from('orders').select('subtotal, user_id').eq('id', orderId).single();
+          if (order) {
+            const { data: orderUser } = await supabase.from('users').select('subscription, op_balance').eq('id', order.user_id).single();
+            const tierRate = (orderUser && orderUser.subscription === 'legend') ? 0.10
+              : (orderUser && orderUser.subscription === 'insider') ? 0.07 : 0.05;
+            const earnedPts = Math.round(order.subtotal * tierRate * 100);
+
+            if (earnedPts > 0 && orderUser) {
+              await supabase.from('users').update({
+                op_balance: (orderUser.op_balance || 0) + earnedPts
+              }).eq('id', order.user_id);
+
+              await supabase.from('transactions').insert({
+                user_id: order.user_id, type: 'purchase_reward', currency: 'store_credits',
+                amount: earnedPts, description: 'Order ' + orderNumber + ': +' + earnedPts + ' Style Points'
+              });
+            }
+          }
+          console.log('[Order] ' + orderNumber + ' payment confirmed — awaiting fulfillment');
+        }
+        break;
+      }
+
+      case 'checkout.session.expired': {
+        const session = event.data.object;
+        if (session.metadata && session.metadata.order_id) {
+          await supabase.from('orders').update({
+            status: 'payment_failed', updated_at: new Date().toISOString()
+          }).eq('id', session.metadata.order_id);
+          console.log('[Order] ' + (session.metadata.order_number || 'unknown') + ' checkout expired');
+        }
+        break;
+      }
+
+      case 'invoice.payment_failed': {
+        const invoice = event.data.object;
+        console.warn('[Stripe] Payment failed for customer:', invoice.customer);
+        // Downgrade handled by customer.subscription.updated when status changes
+        break;
+      }
+
+      case 'invoice.payment_succeeded': {
+        const invoice = event.data.object;
+        console.log('[Stripe] Payment succeeded for customer:', invoice.customer);
         break;
       }
     }
