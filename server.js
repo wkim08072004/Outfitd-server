@@ -24,6 +24,7 @@ app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
 
 // Parse cookies and JSON
 app.use(cookieParser());
+app.use('/api/webhooks', require('./routes/webhooks'));
 app.use(express.json({ limit: '2mb' }));
 
 // Routes
@@ -39,6 +40,7 @@ app.use('/api/orders', require('./routes/orders'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/ai', require('./routes/ai'));
 app.use('/api/verify', require('./routes/verify'));
+app.use('/api/subscriptions', require('./routes/subscriptions'));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
