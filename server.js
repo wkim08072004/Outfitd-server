@@ -37,6 +37,7 @@ app.use('/api/seller', require('./routes/seller'));
 app.use('/api/posts', require('./routes/posts'));
 app.use('/api/orders', require('./routes/orders'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/ai', require('./routes/ai'));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
