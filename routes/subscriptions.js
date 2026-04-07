@@ -1,112 +1,127 @@
+// ═══════════════════════════════════════════════════════════════
+// subscriptions.js — Stripe subscription routes
+// Drop into /Users/eshapatel/outfitd-server/routes/subscriptions.js
+// Add to server.js: app.use('/api/subscriptions', require('./routes/subscriptions'));
+// ═══════════════════════════════════════════════════════════════
 const express = require('express');
 const router = express.Router();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const jwt = require('jsonwebtoken');
-const supabase = require('../lib/supabase');
-const Stripe = require('stripe');
+const { createClient } = require('@supabase/supabase-js');
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 function requireAuth(req, res, next) {
+  const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const token = req.cookies.token;
-    if (!token) return res.status(401).json({ error: 'Not logged in' });
     req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
-  } catch (err) { res.status(401).json({ error: 'Invalid session' }); }
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
 }
 
-// POST /api/subscriptions/checkout — create Stripe Checkout Session
+// ── Tier → Stripe Price ID mapping ──
+const TIER_PRICES = {
+  insider: process.env.STRIPE_INSIDER_PRICE_ID,
+  legend: process.env.STRIPE_LEGEND_PRICE_ID,
+};
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/subscriptions/checkout
+// Creates a Stripe Checkout Session for subscription, returns URL
+// ═══════════════════════════════════════════════════════════════
 router.post('/checkout', requireAuth, async (req, res) => {
   try {
-    const { priceId } = req.body;
-    if (!priceId) return res.status(400).json({ error: 'Price ID required' });
+    const { tier } = req.body;
+    const priceId = TIER_PRICES[tier];
+    if (!priceId) return res.status(400).json({ error: 'Invalid subscription tier' });
 
-    const { data: user } = await supabase
-      .from('users').select('id, email, stripe_customer_id').eq('id', req.user.userId).single();
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const userId = req.user.id;
 
-    // Create or reuse Stripe customer
-    let customerId = user.stripe_customer_id;
+    // Get or create Stripe customer
+    const { data: userRecord } = await supabase
+      .from('users')
+      .select('stripe_customer_id, email')
+      .eq('id', userId)
+      .single();
+
+    let customerId = userRecord?.stripe_customer_id;
     if (!customerId) {
-      const customer = await stripe.customers.create({ email: user.email, metadata: { userId: user.id } });
+      const customer = await stripe.customers.create({
+        email: userRecord?.email,
+        metadata: { outfitd_user_id: userId },
+      });
       customerId = customer.id;
-      await supabase.from('users').update({ stripe_customer_id: customerId }).eq('id', user.id);
+      await supabase.from('users').update({ stripe_customer_id: customerId }).eq('id', userId);
     }
 
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
       mode: 'subscription',
-      payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: (process.env.FRONTEND_URL || 'https://outfitd.co') + '?subscription=success',
-      cancel_url: (process.env.FRONTEND_URL || 'https://outfitd.co') + '?subscription=cancelled',
-      metadata: { userId: user.id }
+      metadata: { outfitd_user_id: userId, tier },
+      success_url: `${process.env.FRONTEND_URL}?subscription_success=${tier}`,
+      cancel_url: `${process.env.FRONTEND_URL}?subscription_cancelled=1`,
     });
 
-    res.json({ url: session.url });
+    return res.json({ url: session.url });
   } catch (err) {
-    console.error('Checkout error:', err);
-    res.status(500).json({ error: 'Checkout failed' });
+    console.error('Subscription checkout error:', err);
+    return res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
 
-// POST /api/subscriptions/portal — customer portal for managing subscription
-router.post('/portal', requireAuth, async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// GET /api/subscriptions/portal
+// Creates a Stripe Customer Portal session, returns URL
+// ═══════════════════════════════════════════════════════════════
+router.get('/portal', requireAuth, async (req, res) => {
   try {
-    const { data: user } = await supabase
-      .from('users').select('stripe_customer_id').eq('id', req.user.userId).single();
+    const { data: userRecord } = await supabase
+      .from('users')
+      .select('stripe_customer_id')
+      .eq('id', req.user.id)
+      .single();
 
-    if (!user || !user.stripe_customer_id)
-      return res.status(400).json({ error: 'No active subscription' });
-
-    const session = await stripe.billingPortal.sessions.create({
-      customer: user.stripe_customer_id,
-      return_url: process.env.FRONTEND_URL || 'https://outfitd.co'
-    });
-
-    res.json({ url: session.url });
-  } catch (err) {
-    console.error('Portal error:', err);
-    res.status(500).json({ error: 'Portal failed' });
-  }
-});
-
-// GET /api/subscriptions/status — get current subscription from Stripe
-router.get('/status', requireAuth, async (req, res) => {
-  try {
-    const { data: user } = await supabase
-      .from('users').select('subscription, stripe_customer_id').eq('id', req.user.userId).single();
-
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (!user.stripe_customer_id)
-      return res.json({ subscription: 'free', active: false });
-
-    // Check live Stripe data
-    const subscriptions = await stripe.subscriptions.list({
-      customer: user.stripe_customer_id, status: 'active', limit: 1
-    });
-
-    if (subscriptions.data.length === 0)
-      return res.json({ subscription: 'free', active: false });
-
-    const sub = subscriptions.data[0];
-    const priceId = sub.items.data[0].price.id;
-
-    // Map price ID to tier
-    let tier = 'free';
-    if (priceId === process.env.STRIPE_INSIDER_PRICE_ID) tier = 'insider';
-    else if (priceId === process.env.STRIPE_LEGEND_PRICE_ID) tier = 'legend';
-
-    // Sync to database
-    if (user.subscription !== tier) {
-      await supabase.from('users').update({ subscription: tier }).eq('id', req.user.userId);
+    if (!userRecord?.stripe_customer_id) {
+      return res.status(400).json({ error: 'No billing account found — subscribe first' });
     }
 
-    res.json({ subscription: tier, active: true, currentPeriodEnd: sub.current_period_end });
+    const session = await stripe.billingPortal.sessions.create({
+      customer: userRecord.stripe_customer_id,
+      return_url: process.env.FRONTEND_URL,
+    });
+
+    return res.json({ url: session.url });
   } catch (err) {
-    console.error('Status error:', err);
-    res.status(500).json({ error: 'Status check failed' });
+    console.error('Portal error:', err);
+    return res.status(500).json({ error: 'Failed to open billing portal' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GET /api/subscriptions/status
+// Returns current subscription status from DB
+// ═══════════════════════════════════════════════════════════════
+router.get('/status', requireAuth, async (req, res) => {
+  try {
+    const { data } = await supabase
+      .from('users')
+      .select('subscription, subscription_expires_at')
+      .eq('id', req.user.id)
+      .single();
+
+    return res.json({
+      tier: data?.subscription || 'free',
+      expires_at: data?.subscription_expires_at || null,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch subscription status' });
   }
 });
 

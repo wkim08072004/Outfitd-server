@@ -1,55 +1,118 @@
+// ═══════════════════════════════════════════════════════════════
+// ai.js — AI proxy routes (Anthropic API)
+// Drop into /Users/eshapatel/outfitd-server/routes/ai.js
+// Add to server.js: app.use('/api/ai', require('./routes/ai'));
+// ═══════════════════════════════════════════════════════════════
 const express = require('express');
 const router = express.Router();
-const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 
-const aiLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, message: { error: 'Too many AI requests' } });
-router.use(aiLimiter);
-
-function requireAuth(req, res, next) {
-  try {
-    const token = req.cookies.token;
-    if (!token) return res.status(401).json({ error: 'Not logged in' });
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
-  } catch (err) { res.status(401).json({ error: 'Invalid session' }); }
-}
-
-function sanitize(str) {
-  if (!str) return '';
-  return str.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 200).trim();
-}
-
-router.post('/search', requireAuth, async (req, res) => {
-  try {
-    const query = sanitize(req.body.query);
-    if (!query) return res.status(400).json({ error: 'Query required' });
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'AI not configured' });
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 300, messages: [{ role: 'user', content: 'You are a fashion shopping assistant for Outfitd. User searched: "' + query + '". Suggest 3-5 relevant items. Be brief. No links.' }] })
-    });
-    const data = await response.json();
-    res.json({ result: data.content && data.content[0] ? data.content[0].text : 'No suggestions.' });
-  } catch (err) { console.error('AI search error:', err); res.status(500).json({ error: 'AI search failed' }); }
+// ── Rate limit: 20 AI requests per user per minute ──
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { error: 'Too many AI requests — try again in a minute' },
 });
 
-router.post('/suggest', requireAuth, async (req, res) => {
+// ── Auth middleware ──
+const jwt = require('jsonwebtoken');
+function requireAuth(req, res, next) {
+  const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const query = sanitize(req.body.query);
-    if (!query) return res.status(400).json({ error: 'Query required' });
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(500).json({ error: 'AI not configured' });
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// ── Input sanitizer ──
+function sanitize(str, maxLen) {
+  if (typeof str !== 'string') return '';
+  // Strip control characters, limit length
+  return str.replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, maxLen || 200);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/ai/suggest — Outfit suggestion proxy
+// ═══════════════════════════════════════════════════════════════
+router.post('/suggest', requireAuth, aiLimiter, async (req, res) => {
+  try {
+    const pieces = sanitize(req.body.pieces, 1000);
+    const missing = sanitize(req.body.missing, 200);
+    const budget = Math.min(Math.max(0, Number(req.body.budget) || 0), 100000);
+
+    if (!pieces) {
+      return res.status(400).json({ error: 'No outfit pieces provided' });
+    }
+
+    const prompt = `You are a fashion stylist AI for OUTFITD, a streetwear social commerce platform. Based on this outfit so far:
+${pieces}
+Budget spent: $${budget}
+Empty slots: ${missing}
+In 2-3 sentences, suggest what to add to complete the outfit — be specific about style, color, and type of item. Keep it casual and hype. No markdown.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 400, messages: [{ role: 'user', content: 'You are a streetwear style advisor for Outfitd. User asks: "' + query + '". Give a brief styling suggestion. No links.' }] })
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      }),
     });
+
     const data = await response.json();
-    res.json({ result: data.content && data.content[0] ? data.content[0].text : 'No suggestions.' });
-  } catch (err) { console.error('AI suggest error:', err); res.status(500).json({ error: 'AI suggest failed' }); }
+    const suggestion =
+      data.content?.[0]?.text ||
+      'Looking good! Try adding something that contrasts your current palette.';
+
+    return res.json({ suggestion });
+  } catch (err) {
+    console.error('AI suggest error:', err);
+    return res.json({
+      suggestion: 'Looking fire so far! Try balancing with a neutral piece to tie it together.',
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/ai/search — Shop search proxy
+// ═══════════════════════════════════════════════════════════════
+router.post('/search', requireAuth, aiLimiter, async (req, res) => {
+  try {
+    const query = sanitize(req.body.query, 200);
+    if (!query) return res.status(400).json({ error: 'No query provided' });
+
+    const prompt = `You are a shopping assistant for OUTFITD. The user searched for: "${query}". Return a JSON array of up to 5 relevant search filter suggestions (e.g. style tags, categories, price ranges). Format: [{"tag":"streetwear"},{"tag":"under $50"}]. Only return valid JSON, nothing else.`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    const data = await response.json();
+    const text = data.content?.[0]?.text || '[]';
+    return res.json({ results: text });
+  } catch (err) {
+    console.error('AI search error:', err);
+    return res.json({ results: '[]' });
+  }
 });
 
 module.exports = router;

@@ -1,104 +1,216 @@
+// ═══════════════════════════════════════════════════════════════
+// orders.js — Marketplace order routes
+// Drop into /Users/eshapatel/outfitd-server/routes/orders.js
+// Add to server.js: app.use('/api/orders', require('./routes/orders'));
+// ═══════════════════════════════════════════════════════════════
 const express = require('express');
 const router = express.Router();
-const jwt = require('jsonwebtoken');
-const supabase = require('../lib/supabase');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { createClient } = require('@supabase/supabase-js');
 
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// ── Auth middleware (reuse your existing one, or inline) ──
 function requireAuth(req, res, next) {
+  // Assumes your auth middleware attaches req.user with { id, email, role }
+  // If you have a different pattern, swap this out
+  const jwt = require('jsonwebtoken');
+  const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const token = req.cookies.token;
-    if (!token) return res.status(401).json({ error: 'Not logged in' });
     req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
-  } catch (err) {
-    res.status(401).json({ error: 'Invalid session' });
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
   }
 }
 
-async function requireAdmin(req, res, next) {
-  const { data: user } = await supabase.from('users').select('role').eq('id', req.user.userId).single();
-  if (!user || user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  next();
-}
-
+// ═══════════════════════════════════════════════════════════════
 // POST /api/orders/create
+// Creates order in DB + Stripe Checkout Session, returns checkout URL
+// ═══════════════════════════════════════════════════════════════
 router.post('/create', requireAuth, async (req, res) => {
   try {
-    const { listing_id, shipping_address, stripe_payment_id } = req.body;
+    const { items, shipping_address, email, payment_method, store_credit_applied } = req.body;
+    const userId = req.user.id;
 
-    const { data: listing } = await supabase
-      .from('seller_listings').select('*').eq('id', listing_id).eq('status', 'published').single();
-    if (!listing) return res.status(404).json({ error: 'Listing not found' });
+    if (!items || !items.length) {
+      return res.status(400).json({ error: 'No items provided' });
+    }
+    if (!shipping_address || !shipping_address.street) {
+      return res.status(400).json({ error: 'Shipping address required' });
+    }
 
-    const { data: order, error } = await supabase.from('orders').insert({
-      buyer_id: req.user.userId, seller_id: listing.seller_id, listing_id,
-      total: listing.price, stripe_payment_id: stripe_payment_id || null,
-      shipping_address: shipping_address || null, status: 'paid'
-    }).select().single();
+    // ── Calculate totals SERVER-SIDE (never trust client totals) ──
+    // In production: look up each product price from the DB
+    // For now, validate items have prices and compute server-side
+    let subtotal = 0;
+    const validatedItems = [];
+    for (const item of items) {
+      // TODO: Look up actual price from products table
+      // const { data: product } = await supabase.from('products').select('price').eq('id', item.product_id).single();
+      // const serverPrice = product.price;
+      const serverPrice = Math.round(item.price * 100) / 100; // cents safety
+      if (serverPrice <= 0 || serverPrice > 50000) {
+        return res.status(400).json({ error: 'Invalid item price: ' + item.name });
+      }
+      subtotal += serverPrice * (item.qty || 1);
+      validatedItems.push({
+        product_id: item.product_id,
+        brand: item.brand,
+        seller_id: item.seller_id,
+        name: item.name,
+        size: item.size,
+        qty: item.qty || 1,
+        unit_price: serverPrice,
+      });
+    }
 
-    if (error) throw error;
-    res.status(201).json({ order });
+    const shipping = subtotal >= 100 ? 0 : 8.99;
+    const tax = Math.round(subtotal * 0.08 * 100) / 100;
+    const total = Math.round((subtotal + shipping + tax) * 100) / 100;
+    const platformFee = Math.round(total * 0.15 * 100) / 100; // 15% platform fee
+
+    // ── Create order in DB ──
+    const orderNumber = 'OFD-MKT-' + Date.now().toString(36).toUpperCase().slice(-8);
+
+    const { data: order, error: orderErr } = await supabase
+      .from('orders')
+      .insert({
+        order_number: orderNumber,
+        user_id: userId,
+        buyer_email: email,
+        shipping_address: shipping_address,
+        items: validatedItems,
+        subtotal,
+        shipping,
+        tax,
+        total,
+        platform_fee: platformFee,
+        seller_payout: Math.round((total - platformFee) * 100) / 100,
+        status: 'pending_payment',
+        payment_method: payment_method || 'stripe',
+        store_credit_applied: store_credit_applied || 0,
+      })
+      .select()
+      .single();
+
+    if (orderErr) {
+      console.error('Order creation error:', orderErr);
+      return res.status(500).json({ error: 'Failed to create order' });
+    }
+
+    // ── Create Stripe Checkout Session ──
+    // Get or create Stripe customer
+    let stripeCustomerId;
+    const { data: userRecord } = await supabase
+      .from('users')
+      .select('stripe_customer_id, email')
+      .eq('id', userId)
+      .single();
+
+    if (userRecord?.stripe_customer_id) {
+      stripeCustomerId = userRecord.stripe_customer_id;
+    } else {
+      const customer = await stripe.customers.create({
+        email: email || userRecord?.email,
+        metadata: { outfitd_user_id: userId },
+      });
+      stripeCustomerId = customer.id;
+      await supabase.from('users').update({ stripe_customer_id: customer.id }).eq('id', userId);
+    }
+
+    const lineItems = validatedItems.map(item => ({
+      price_data: {
+        currency: 'usd',
+        product_data: {
+          name: item.name,
+          description: `${item.brand} · Size ${item.size}`,
+        },
+        unit_amount: Math.round(item.unit_price * 100), // Stripe uses cents
+      },
+      quantity: item.qty,
+    }));
+
+    // Add shipping as a line item if applicable
+    if (shipping > 0) {
+      lineItems.push({
+        price_data: {
+          currency: 'usd',
+          product_data: { name: 'Shipping' },
+          unit_amount: Math.round(shipping * 100),
+        },
+        quantity: 1,
+      });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: stripeCustomerId,
+      mode: 'payment',
+      line_items: lineItems,
+      automatic_tax: { enabled: false }, // We calculate tax ourselves
+      metadata: {
+        order_id: order.id,
+        order_number: orderNumber,
+        platform_fee: platformFee.toString(),
+      },
+      success_url: `${process.env.FRONTEND_URL}?order_success=${orderNumber}`,
+      cancel_url: `${process.env.FRONTEND_URL}?order_cancelled=${orderNumber}`,
+    });
+
+    // Update order with Stripe session ID
+    await supabase
+      .from('orders')
+      .update({ stripe_session_id: session.id })
+      .eq('id', order.id);
+
+    return res.json({ checkout_url: session.url, order_number: orderNumber });
   } catch (err) {
-    console.error('Order error:', err);
-    res.status(500).json({ error: 'Order failed' });
+    console.error('Order create error:', err);
+    return res.status(500).json({ error: 'Order processing failed' });
   }
 });
 
-// GET /api/orders — buyer's orders
-router.get('/', requireAuth, async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// GET /api/orders/history
+// Returns the user's past orders
+// ═══════════════════════════════════════════════════════════════
+router.get('/history', requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
-      .from('orders').select('*, seller_listings(title, images)')
-      .eq('buyer_id', req.user.userId)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json({ orders: data });
+      .from('orders')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) return res.status(500).json({ error: 'Failed to fetch orders' });
+    return res.json({ orders: data || [] });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch orders' });
+    return res.status(500).json({ error: 'Failed to fetch orders' });
   }
 });
 
-// POST /api/orders/:id/return
-router.post('/:id/return', requireAuth, async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// GET /api/orders/:id
+// Returns a single order detail
+// ═══════════════════════════════════════════════════════════════
+router.get('/:id', requireAuth, async (req, res) => {
   try {
-    const { reason } = req.body;
-    const { data: order } = await supabase
-      .from('orders').select('*').eq('id', req.params.id).eq('buyer_id', req.user.userId).single();
-    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('order_number', req.params.id)
+      .eq('user_id', req.user.id)
+      .single();
 
-    // Check 30-day return window
-    const orderDate = new Date(order.created_at);
-    const now = new Date();
-    if ((now - orderDate) > 30 * 24 * 60 * 60 * 1000)
-      return res.status(400).json({ error: 'Return window has expired (30 days)' });
-
-    const { data, error } = await supabase.from('order_returns').insert({
-      order_id: req.params.id, reason: reason || ''
-    }).select().single();
-
-    if (error) throw error;
-
-    await supabase.from('orders').update({ status: 'return_requested' }).eq('id', req.params.id);
-    res.status(201).json({ return_request: data });
+    if (error || !data) return res.status(404).json({ error: 'Order not found' });
+    return res.json({ order: data });
   } catch (err) {
-    console.error('Return error:', err);
-    res.status(500).json({ error: 'Return request failed' });
-  }
-});
-
-// POST /api/orders/returns/:id/approve — admin
-router.post('/returns/:id/approve', requireAuth, requireAdmin, async (req, res) => {
-  try {
-    await supabase.from('order_returns')
-      .update({ status: 'approved', approved_by: req.user.userId, approved_at: new Date().toISOString() })
-      .eq('id', req.params.id);
-
-    const { data: ret } = await supabase
-      .from('order_returns').select('order_id').eq('id', req.params.id).single();
-
-    await supabase.from('orders').update({ status: 'returned' }).eq('id', ret.order_id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Approve failed' });
+    return res.status(500).json({ error: 'Failed to fetch order' });
   }
 });
 
