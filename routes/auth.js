@@ -170,8 +170,8 @@ router.post('/google', async (req, res) => {
 
         // Check if user already exists (by social_id or email)
         const { data: existing } = await supabase
-            .select(SAFE_SELECT)
             .from('users')
+            .select(SAFE_SELECT)
             .or(`social_id.eq.${socialId},email.eq.${email.toLowerCase()}`)
             .limit(1);
 
