@@ -2239,7 +2239,11 @@ function syncServerUser(serverUser) {
   S.user.name     = serverUser.display_name || S.user.name;
   S.user.handle   = '@' + (serverUser.handle || '').replace('@','');
   S.user.bio      = serverUser.bio || S.user.bio;
-  S.user.avi      = serverUser.avatar_url || S.user.avi;
+  if (serverUser.avatar_url && serverUser.avatar_url.startsWith('http')) {
+    S.user.aviPhoto = serverUser.avatar_url;
+  } else {
+    S.user.avi = serverUser.avatar_url || S.user.avi;
+  }
   S.user.points   = serverUser.op_balance || 0;
   S.user.op       = serverUser.op_balance || 0;
   S.user.cashOP   = serverUser.store_credits || 0;
