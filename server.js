@@ -17,7 +17,7 @@ const { Logtail } = require("@logtail/node");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-
+app.set('trust proxy', 1);
 // Shared services
 const logtail = process.env.LOGTAIL_TOKEN ? new Logtail(process.env.LOGTAIL_TOKEN) : null;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
