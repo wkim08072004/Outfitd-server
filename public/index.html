@@ -10494,7 +10494,7 @@ function _finishSocialLogin(acct, handle) {
   S.user.name      = acct.name  || handle;
   S.user.email     = acct.email || null;
   S.loginStreak    = S.loginStreak || 0;
-  saveState();
+  // state is persisted server-side via JWT cookies
   updateAuthUI();
   renderActiveTab();
   updateStreakBadge();
