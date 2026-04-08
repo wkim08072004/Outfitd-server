@@ -37,6 +37,7 @@ app.use(cors({
 // General rate limit
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 
+app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Too many login attempts. Please try again in 15 minutes.' } }));
 // Tighter limit on auth routes
 app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
 
