@@ -10443,7 +10443,6 @@ function handleGoogleLogin() {
         var name    = payload.name  || payload.given_name || 'User';
         var socialId = 'google_' + (payload.sub || email);
 
-        // ── Server Google auth (async) ──
         api('POST', '/api/auth/google', { credential: response.credential })
           .then(function(data) { if (data.user) syncServerUser(data.user); })
           .catch(function(err) { console.log('Server Google auth:', err.message || err); });
@@ -10452,13 +10451,22 @@ function handleGoogleLogin() {
       } catch(e) { showToast('Google sign-in failed. Please try again.'); }
     },
     auto_select: false,
-    cancel_on_tap_outside: true
+    cancel_on_tap_outside: true,
+    ux_mode: 'popup'
   });
-  google.accounts.id.prompt(function(n) {
-    if (n.isNotDisplayed() || n.isSkippedMoment()) {
-      showToast('Google prompt blocked. Try disabling your popup blocker.');
-    }
-  });
+
+  // Render a hidden Google button and click it (works in Safari)
+  var tmp = document.createElement('div');
+  tmp.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+  tmp.id = 'g-btn-tmp';
+  document.body.appendChild(tmp);
+  google.accounts.id.renderButton(tmp, { type: 'standard', size: 'large' });
+  setTimeout(function() {
+    var iframe = tmp.querySelector('iframe');
+    var btn = tmp.querySelector('[role="button"]') || tmp.querySelector('div[style]');
+    if (btn) btn.click();
+    setTimeout(function() { tmp.remove(); }, 5000);
+  }, 300);
 }
 
 function _processSocialAuth(email, name, socialId, providerLabel) {
