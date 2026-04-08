@@ -170,8 +170,8 @@ router.post('/google', async (req, res) => {
 
         // Check if user already exists (by social_id or email)
         const { data: existing } = await supabase
-            .select(SAFE_SELECT)
             .from('users')
+            .select(SAFE_SELECT)
             .or(`social_id.eq.${socialId},email.eq.${email.toLowerCase()}`)
             .limit(1);
 
@@ -390,7 +390,7 @@ router.post('/forgot-password', async (req, res) => {
           const { Resend } = require('resend');
           const resend = new Resend(process.env.RESEND_API_KEY);
           await resend.emails.send({
-            from: 'Outfitd <onboarding@resend.dev>',
+            from: 'Outfitd <noreply@outfitd.co>',
             to: user.email,
             subject: 'Reset your Outfitd password',
             html: `

@@ -2239,7 +2239,11 @@ function syncServerUser(serverUser) {
   S.user.name     = serverUser.display_name || S.user.name;
   S.user.handle   = '@' + (serverUser.handle || '').replace('@','');
   S.user.bio      = serverUser.bio || S.user.bio;
-  S.user.avi      = serverUser.avatar_url || S.user.avi;
+  if (serverUser.avatar_url && serverUser.avatar_url.startsWith('http')) {
+    S.user.aviPhoto = serverUser.avatar_url;
+  } else {
+    S.user.avi = serverUser.avatar_url || S.user.avi;
+  }
   S.user.points   = serverUser.op_balance || 0;
   S.user.op       = serverUser.op_balance || 0;
   S.user.cashOP   = serverUser.store_credits || 0;
@@ -4306,13 +4310,22 @@ function renderAviHtml(user,size){
   return '<span style="font-size:'+(s*0.5)+'px;line-height:1">'+((user&&user.avi)||'😎')+'</span>';
 }
 
+
+function safeAviInline(avi, size) {
+  var s = size || 18;
+  if (avi && avi.startsWith && avi.startsWith('http')) {
+    return '<img src="'+esc(avi)+'" style="width:'+s+'px;height:'+s+'px;border-radius:50%;object-fit:cover;display:inline-block;vertical-align:middle" alt="avatar"/>';
+  }
+  return esc(avi || '😎');
+}
+
 function renderCrewNavTab(){
   var btn=document.getElementById('nav-tab-creators');
   if(!btn) return;
   if(S.loggedIn&&S.user.avi){
     var inner=S.user.aviPhoto
       ? '<img src="'+esc(S.user.aviPhoto)+'" style="width:26px;height:26px;border-radius:50%;object-fit:cover;display:block;border:2px solid var(--border)" alt="avatar"/>'
-      : '<span style="font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:var(--surface2);border:2px solid var(--border)">'+esc(S.user.avi)+'</span>';
+      : (S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:26px;height:26px;border-radius:50%;object-fit:cover;display:block;border:2px solid var(--border)" alt="avatar"/>' : '<span style="font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:var(--surface2);border:2px solid var(--border)">'+esc(S.user.avi)+'</span>';
     btn.innerHTML=inner;
     btn.style.padding='4px 8px';
     btn.title='Your profile';
@@ -7541,7 +7554,7 @@ function renderCrew(){
         '<div class="profile-avi" onclick="openModal(\'edit-profile\')" title="Change avatar" style="cursor:pointer;transition:transform .18s;position:relative;overflow:hidden;padding:0;" onmouseover="this.querySelector(\'.avi-edit-hint\').style.opacity=\'1\'" onmouseout="this.querySelector(\'.avi-edit-hint\').style.opacity=\'0\'">'+
           (S.user.aviPhoto
             ? '<img src="'+esc(S.user.aviPhoto)+'" style="width:100%;height:100%;object-fit:cover;display:block;border-radius:50%" alt="avatar"/>'
-            : esc(S.user.avi))+
+            : safeAviInline(S.user.avi, 18))+
           '<div class="avi-edit-hint" style="position:absolute;inset:0;border-radius:50%;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;font-size:16px;opacity:0;transition:opacity .18s;pointer-events:none">✎</div>'+
         '</div>'+
       '</div>'+
@@ -8286,7 +8299,7 @@ function openModal(type,data){
     var aviHtml=aviPool.map(function(a){return '<div class="emoji-opt '+(S.user.avi===a&&!S.user.aviPhoto?'selected':'')+'" onclick="selectAvi(this,\''+a+'\')" style="font-size:20px">'+a+'</div>';}).join('');
     var currentAviHtml=S.user.aviPhoto
       ? '<img src="'+esc(S.user.aviPhoto)+'" style="width:54px;height:54px;border-radius:50%;object-fit:cover;display:block" alt="avatar"/>'
-      : '<span style="font-size:26px">'+esc(S.user.avi)+'</span>';
+      : (S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:60px;height:60px;border-radius:50%;object-fit:cover" alt="avatar"/>' : '<span style="font-size:26px">'+esc(S.user.avi)+'</span>';
     h='<div class="modal-title">EDIT PROFILE</div>'+
       // Live preview
       '<div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;padding:14px;background:var(--surface2);border-radius:var(--radius-lg);border:1px solid var(--border)">'+
@@ -8352,7 +8365,7 @@ function openModal(type,data){
       '<div id="banner-preview" style="height:80px;border-radius:var(--radius-lg);margin-bottom:16px;position:relative;overflow:hidden;'+previewStyle+';transition:all .3s">'+
         '<div style="position:absolute;inset:0;background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.04) 0,rgba(255,255,255,.04) 1px,transparent 0,transparent 50%);background-size:14px 14px"></div>'+
         '<div style="position:absolute;bottom:10px;left:14px;display:flex;align-items:center;gap:8px">'+
-          '<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);display:flex;align-items:center;justify-content:center;font-size:18px">'+esc(S.user.avi)+'</div>'+
+          ((S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,.4)" alt="avatar"/>' : '<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);display:flex;align-items:center;justify-content:center;font-size:18px">'+esc(S.user.avi)+'</div>')+
           '<div style="font-size:13px;font-weight:700;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.5)">'+esc(S.user.name||'Your Name')+'</div>'+
         '</div>'+
       '</div>'+
@@ -9551,7 +9564,7 @@ function clearAviPhoto(){
   S.user.aviPhoto=null;
   var hid=document.getElementById('m-ep-aviphoto');if(hid)hid.value='__CLEAR__';
   var prev=document.getElementById('avi-preview');
-  if(prev){prev.innerHTML='<span style="font-size:26px">'+esc(S.user.avi)+'</span>';}
+  if(prev){prev.innerHTML=(S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:60px;height:60px;border-radius:50%;object-fit:cover" alt="avatar"/>' : '<span style="font-size:26px">'+esc(S.user.avi)+'</span>';}
   saveSession(getSessionType());renderCrewNavTab();renderCrew();
   openModal('edit-profile');
 }
@@ -10450,11 +10463,17 @@ function handleGoogleLogin() {
     auto_select: false,
     cancel_on_tap_outside: true
   });
-  google.accounts.id.prompt(function(n) {
-    if (n.isNotDisplayed() || n.isSkippedMoment()) {
-      showToast('Google prompt blocked. Try disabling your popup blocker.');
-    }
-  });
+  // Render a hidden Google button and click it (works in Safari)
+  var tmp = document.createElement('div');
+  tmp.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+  tmp.id = 'g-btn-tmp';
+  document.body.appendChild(tmp);
+  google.accounts.id.renderButton(tmp, { type: 'standard', size: 'large' });
+  setTimeout(function() {
+    var btn = tmp.querySelector('[role="button"]') || tmp.querySelector('div[style]');
+    if (btn) btn.click();
+    setTimeout(function() { tmp.remove(); }, 5000);
+  }, 300);
 }
 
 function _processSocialAuth(email, name, socialId, providerLabel) {
@@ -10494,7 +10513,7 @@ function _finishSocialLogin(acct, handle) {
   S.user.name      = acct.name  || handle;
   S.user.email     = acct.email || null;
   S.loginStreak    = S.loginStreak || 0;
-  saveState();
+  // state is persisted server-side via JWT cookies
   updateAuthUI();
   renderActiveTab();
   updateStreakBadge();
