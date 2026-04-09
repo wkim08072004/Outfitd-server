@@ -5982,7 +5982,7 @@ function addToCart(id,silent){
   var remaining=isLimited?Math.max(0,p.stock-(p.sold||0)):999;
   if(isLimited&&remaining<=0){showToast('This item is sold out');return;}
   if(!S.cart.find(function(c){return c.id===id;})){S.cart.push(Object.assign({},p,{qty:1}));if(!silent)showToast(p.name+' added to cart');}
-  else{if(!silent)showToast('Already in cart!');}
+  else{S.cart=S.cart.filter(function(c){return c.id!==id;});if(!silent)showToast(p.name+' removed from cart');}
   updateCartBadge();if(S.cartOpen)renderCart();if(S.tab==='shop')renderShop();
 }
 function removeFromCart(id){S.cart=S.cart.filter(function(c){return c.id!==id;});updateCartBadge();renderCart();if(S.tab==='shop')renderShop();}
