@@ -489,3 +489,8 @@ router.post('/delete-account', async (req, res) => {
 });
 
 module.exports = router;
+
+// ── PUBLIC CONFIG (serves Google Client ID to frontend) ─────
+router.get('/google-config', (req, res) => {
+    res.json({ clientId: process.env.GOOGLE_CLIENT_ID || '' });
+});
