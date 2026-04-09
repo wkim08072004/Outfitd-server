@@ -2220,7 +2220,7 @@ textarea.sdr-form-input{resize:vertical;min-height:80px;line-height:1.5;}
 var API_URL = 'https://outfitd-server.onrender.com';
 
 // ── Stripe Setup ──
-var _stripe = typeof Stripe !== 'undefined' ? Stripe('pk_test_REPLACE_WITH_YOUR_STRIPE_PUBLISHABLE_KEY') : null;
+var _stripe = typeof Stripe !== 'undefined' ? Stripe('pk_test_51TJ3zv4HNeGW1MzXK4MepdmAqPFy7EiP5OkwO7WzBxIt2tN4Y3r5TdK4h8VVMDdc9ZTMWyIqSwcmzthKeKKQ7aVY00DCfpWyF6') : null;
 var _stripeElements = null;
 var _stripePaymentElement = null;
 var _stripeClientSecret = null;
@@ -2316,7 +2316,7 @@ function handleStripeReturn() {
     // Retrieve PaymentIntent status via Stripe.js
     var clientSecret = params.get('payment_intent_client_secret');
     if(clientSecret && typeof Stripe !== 'undefined'){
-      var _strCheck = Stripe('pk_test_REPLACE_WITH_YOUR_STRIPE_PUBLISHABLE_KEY');
+      var _strCheck = Stripe('pk_test_51TJ3zv4HNeGW1MzXK4MepdmAqPFy7EiP5OkwO7WzBxIt2tN4Y3r5TdK4h8VVMDdc9ZTMWyIqSwcmzthKeKKQ7aVY00DCfpWyF6');
       _strCheck.retrievePaymentIntent(clientSecret).then(function(result){
         if(result.paymentIntent && result.paymentIntent.status === 'succeeded'){
           showToast('🎉 Payment successful! Your order is confirmed.');
