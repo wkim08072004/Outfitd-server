@@ -9,7 +9,7 @@
 <meta property="og:type" content="website"/>
 <meta property="og:image" content="https://outfitd.com/og-image.png"/>
 <meta name="twitter:card" content="summary_large_image"/>
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com https://js.stripe.com https://appleid.cdn-apple.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src https://fonts.gstatic.com; connect-src 'self' https://outfitd-server.onrender.com https://js.stripe.com https://api.stripe.com https://www.paypal.com https://api-m.paypal.com https://api-m.sandbox.paypal.com https://accounts.google.com https://appleid.apple.com https://*.sentry.io https://*.ingest.us.sentry.io; img-src 'self' data: blob: https:; frame-src https://js.stripe.com https://accounts.google.com https://appleid.apple.com;"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com https://js.stripe.com https://appleid.cdn-apple.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com; font-src https://fonts.gstatic.com; connect-src 'self' https://outfitd-server.onrender.com https://js.stripe.com https://api.stripe.com https://www.paypal.com https://api-m.paypal.com https://api-m.sandbox.paypal.com https://accounts.google.com https://www.googleapis.com https://appleid.apple.com https://*.sentry.io https://*.ingest.us.sentry.io; img-src 'self' data: blob: https:; frame-src https://js.stripe.com https://accounts.google.com https://appleid.apple.com;"/>
 <meta name="theme-color" content="#c9184a"/>
 <link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23c9184a"/><text x="50%25" y="52%25" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-weight="900" font-size="18" fill="white">O</text></svg>'/>
 <title>OUTFITD — Build Your Fit</title>
@@ -83,6 +83,7 @@ nav{display:flex;align-items:center;justify-content:space-between;padding:0 16px
 .pay-method-sub{font-size:10px;color:var(--text4);font-weight:400;letter-spacing:0;margin-top:1px}
 .pay-method-icon{font-size:18px;flex-shrink:0}
 .pay-method-detail{margin-top:10px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius);border:1px solid var(--border);font-size:12px;color:var(--text3)}
+#stripe-element-container{min-height:60px;padding:4px 0}
 .cash-back-apply{display:flex;align-items:center;gap:8px;margin-top:8px}
 .cash-back-apply input{flex:1;padding:7px 10px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;font-family:var(--font-b)}
 .cash-back-apply button{padding:7px 12px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font-b);white-space:nowrap}
@@ -1989,7 +1990,7 @@ textarea.sdr-form-input{resize:vertical;min-height:80px;line-height:1.5;}
 #seller-app ::-webkit-scrollbar-track{background:transparent;}
 #seller-app ::-webkit-scrollbar-thumb{background:var(--sddimmer);border-radius:2px;}
 </style>
-<!-- Stripe.js — integrate real payments. Add script tag and initialise: var stripe = Stripe('pk_live_YOUR_KEY'); See stripe.com/docs -->
+<script src="https://js.stripe.com/v3/"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 .social-divider{display:flex;align-items:center;gap:10px;margin:14px 0 10px;color:var(--text4);font-size:11px;font-family:var(--font-b);letter-spacing:1px}
@@ -2218,6 +2219,12 @@ textarea.sdr-form-input{resize:vertical;min-height:80px;line-height:1.5;}
 // ═══════════════════════════════════════════════════════════════
 var API_URL = 'https://outfitd-server.onrender.com';
 
+// ── Stripe Setup ──
+var _stripe = typeof Stripe !== 'undefined' ? Stripe('pk_test_REPLACE_WITH_YOUR_STRIPE_PUBLISHABLE_KEY') : null;
+var _stripeElements = null;
+var _stripePaymentElement = null;
+var _stripeClientSecret = null;
+
 function api(method, path, body) {
   var opts = {
     method: method,
@@ -2304,6 +2311,29 @@ function handleStripeReturn() {
     window.history.replaceState({}, '', window.location.pathname);
     setTimeout(function(){ showToast('Order cancelled — your card was not charged.'); }, 500);
   }
+  if (params.get('stripe_return')) {
+    window.history.replaceState({}, '', window.location.pathname);
+    // Retrieve PaymentIntent status via Stripe.js
+    var clientSecret = params.get('payment_intent_client_secret');
+    if(clientSecret && typeof Stripe !== 'undefined'){
+      var _strCheck = Stripe('pk_test_REPLACE_WITH_YOUR_STRIPE_PUBLISHABLE_KEY');
+      _strCheck.retrievePaymentIntent(clientSecret).then(function(result){
+        if(result.paymentIntent && result.paymentIntent.status === 'succeeded'){
+          showToast('🎉 Payment successful! Your order is confirmed.');
+          S.cart = S.cart.filter(function(p){ return p.type !== 'marketplace'; });
+          updateCartBadge(); saveSession(getSessionType());
+          // Notify backend to finalize the order
+          api('POST', '/api/orders/confirm-payment', { payment_intent_id: result.paymentIntent.id }).catch(function(){});
+        } else {
+          showToast('Payment not completed. Please try again.');
+        }
+      });
+    } else {
+      setTimeout(function(){ showToast('🎉 Payment processing! Check your email for confirmation.'); }, 500);
+      S.cart = S.cart.filter(function(p){ return p.type !== 'marketplace'; });
+      updateCartBadge(); saveSession(getSessionType());
+    }
+  }
   if (params.get('subscription_success')) {
     var tier = params.get('subscription_success');
     window.history.replaceState({}, '', window.location.pathname);
@@ -2321,6 +2351,15 @@ function handleStripeReturn() {
   if (params.get('subscription_cancelled')) {
     window.history.replaceState({}, '', window.location.pathname);
     setTimeout(function(){ showToast('Subscription checkout cancelled.'); }, 500);
+  }
+  // ── Password Reset ──
+  if (params.get('reset')) {
+    var resetToken = params.get('reset');
+    window.history.replaceState({}, '', window.location.pathname);
+    setTimeout(function(){
+      openModal('reset-password');
+      window._resetToken = resetToken;
+    }, 300);
   }
 }
 
@@ -4307,25 +4346,19 @@ function renderAviHtml(user,size){
   if(user&&user.aviPhoto){
     return '<img src="'+user.aviPhoto+'" style="width:'+s+'px;height:'+s+'px;border-radius:50%;object-fit:cover;display:block;" alt="avatar"/>';
   }
-  return '<span style="font-size:'+(s*0.5)+'px;line-height:1">'+((user&&user.avi)||'😎')+'</span>';
-}
-
-
-function safeAviInline(avi, size) {
-  var s = size || 18;
-  if (avi && avi.startsWith && avi.startsWith('http')) {
-    return '<img src="'+esc(avi)+'" style="width:'+s+'px;height:'+s+'px;border-radius:50%;object-fit:cover;display:inline-block;vertical-align:middle" alt="avatar"/>';
-  }
-  return esc(avi || '😎');
+  var aviVal = (user&&user.avi)||'😎';
+  if(typeof aviVal==='string'&&aviVal.startsWith('http')){return '<img src="'+aviVal+'" style="width:'+s+'px;height:'+s+'px;border-radius:50%;object-fit:cover;display:block;" alt="avatar"/>';}
+  return '<span style="font-size:'+(s*0.5)+'px;line-height:1">'+aviVal+'</span>';
 }
 
 function renderCrewNavTab(){
   var btn=document.getElementById('nav-tab-creators');
   if(!btn) return;
   if(S.loggedIn&&S.user.avi){
-    var inner=S.user.aviPhoto
-      ? '<img src="'+esc(S.user.aviPhoto)+'" style="width:26px;height:26px;border-radius:50%;object-fit:cover;display:block;border:2px solid var(--border)" alt="avatar"/>'
-      : (S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:26px;height:26px;border-radius:50%;object-fit:cover;display:block;border:2px solid var(--border)" alt="avatar"/>' : '<span style="font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:var(--surface2);border:2px solid var(--border)">'+esc(S.user.avi)+'</span>';
+    var aviIsUrl=typeof S.user.avi==='string'&&S.user.avi.startsWith('http');
+    var inner=(S.user.aviPhoto||aviIsUrl)
+      ? '<img src="'+esc(S.user.aviPhoto||S.user.avi)+'" style="width:26px;height:26px;border-radius:50%;object-fit:cover;display:block;border:2px solid var(--border)" alt="avatar"/>'
+      : '<span style="font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:var(--surface2);border:2px solid var(--border)">'+esc(S.user.avi)+'</span>';
     btn.innerHTML=inner;
     btn.style.padding='4px 8px';
     btn.title='Your profile';
@@ -5927,7 +5960,7 @@ function addToOutfit(id){
   var items=activeOutfitItems();
   // Ensure acc slot exists on older saved outfits
   if(!('acc' in items)) items.acc=null;
-  var wasAdded=!(items[zoneId]&&items[zoneId].id===id);
+  var wasAdded=!(items[zoneId]&&String(items[zoneId].id)===String(id));
   items[zoneId]=wasAdded?p:null;
   showToast(wasAdded?'✓ Added '+p.name+' to '+activeOutfit().name:'Removed '+p.name);
   if(wasAdded&&S.builderActiveZone===zoneId) S.builderActiveZone=null;
@@ -5981,11 +6014,12 @@ function addToCart(id,silent){
   var isLimited=typeof p.stock==='number'&&p.stock>0;
   var remaining=isLimited?Math.max(0,p.stock-(p.sold||0)):999;
   if(isLimited&&remaining<=0){showToast('This item is sold out');return;}
-  if(!S.cart.find(function(c){return c.id===id;})){S.cart.push(Object.assign({},p,{qty:1}));if(!silent)showToast(p.name+' added to cart');}
-  else{S.cart=S.cart.filter(function(c){return c.id!==id;});if(!silent)showToast(p.name+' removed from cart');}
+  var idx=S.cart.findIndex(function(c){return String(c.id)===String(id);});
+  if(idx===-1){S.cart.push(Object.assign({},p,{qty:1}));if(!silent)showToast(p.name+' added to cart');}
+  else{S.cart.splice(idx,1);if(!silent)showToast(p.name+' removed from cart');}
   updateCartBadge();if(S.cartOpen)renderCart();if(S.tab==='shop')renderShop();
 }
-function removeFromCart(id){S.cart=S.cart.filter(function(c){return c.id!==id;});updateCartBadge();renderCart();if(S.tab==='shop')renderShop();}
+function removeFromCart(id){S.cart=S.cart.filter(function(c){return String(c.id)!==String(id);});updateCartBadge();renderCart();if(S.tab==='shop')renderShop();}
 function updateCartBadge(){var b=document.getElementById('cart-count');b.textContent=S.cart.length;b.classList.toggle('show',S.cart.length>0);}
 
 
@@ -6329,6 +6363,32 @@ function submitMarketplaceOrder(){
   var btn = document.querySelector('.btn-pay-all');
   if(btn){btn.disabled=true;btn.textContent='PROCESSING…';}
 
+  // If Stripe Payment Element is mounted, confirm payment directly
+  if(_selectedPayMethod === 'stripe' && _stripeClientSecret && _stripeElements){
+    _stripe.confirmPayment({
+      elements: _stripeElements,
+      confirmParams: {
+        return_url: window.location.origin + window.location.pathname + '?stripe_return=1',
+        receipt_email: email || undefined,
+        shipping: {
+          name: (addr.fname||'')+' '+(addr.lname||''),
+          address: {
+            line1: addr.addr1||'', city: addr.city||'', state: addr.state||'', postal_code: addr.zip||'', country: 'US'
+          },
+          phone: addr.phone||''
+        }
+      }
+    }).then(function(result){
+      if(result.error){
+        showToast(result.error.message || 'Payment failed — please try again');
+        if(btn){btn.disabled=false;btn.textContent='PLACE ORDER';}
+      }
+      // If no error, Stripe redirects to return_url automatically
+    });
+    return;
+  }
+
+  // Fallback: server-side checkout session (wallet, style points, etc.)
   api('POST', '/api/orders/create', {
     items: mktItems.map(function(p){return {
       product_id: p.id,
@@ -7554,7 +7614,7 @@ function renderCrew(){
         '<div class="profile-avi" onclick="openModal(\'edit-profile\')" title="Change avatar" style="cursor:pointer;transition:transform .18s;position:relative;overflow:hidden;padding:0;" onmouseover="this.querySelector(\'.avi-edit-hint\').style.opacity=\'1\'" onmouseout="this.querySelector(\'.avi-edit-hint\').style.opacity=\'0\'">'+
           (S.user.aviPhoto
             ? '<img src="'+esc(S.user.aviPhoto)+'" style="width:100%;height:100%;object-fit:cover;display:block;border-radius:50%" alt="avatar"/>'
-            : safeAviInline(S.user.avi, 18))+
+            : esc(S.user.avi))+
           '<div class="avi-edit-hint" style="position:absolute;inset:0;border-radius:50%;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;font-size:16px;opacity:0;transition:opacity .18s;pointer-events:none">✎</div>'+
         '</div>'+
       '</div>'+
@@ -8299,7 +8359,7 @@ function openModal(type,data){
     var aviHtml=aviPool.map(function(a){return '<div class="emoji-opt '+(S.user.avi===a&&!S.user.aviPhoto?'selected':'')+'" onclick="selectAvi(this,\''+a+'\')" style="font-size:20px">'+a+'</div>';}).join('');
     var currentAviHtml=S.user.aviPhoto
       ? '<img src="'+esc(S.user.aviPhoto)+'" style="width:54px;height:54px;border-radius:50%;object-fit:cover;display:block" alt="avatar"/>'
-      : (S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:60px;height:60px;border-radius:50%;object-fit:cover" alt="avatar"/>' : '<span style="font-size:26px">'+esc(S.user.avi)+'</span>';
+      : '<span style="font-size:26px">'+esc(S.user.avi)+'</span>';
     h='<div class="modal-title">EDIT PROFILE</div>'+
       // Live preview
       '<div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;padding:14px;background:var(--surface2);border-radius:var(--radius-lg);border:1px solid var(--border)">'+
@@ -8365,7 +8425,7 @@ function openModal(type,data){
       '<div id="banner-preview" style="height:80px;border-radius:var(--radius-lg);margin-bottom:16px;position:relative;overflow:hidden;'+previewStyle+';transition:all .3s">'+
         '<div style="position:absolute;inset:0;background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.04) 0,rgba(255,255,255,.04) 1px,transparent 0,transparent 50%);background-size:14px 14px"></div>'+
         '<div style="position:absolute;bottom:10px;left:14px;display:flex;align-items:center;gap:8px">'+
-          ((S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:36px;height:36px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,255,255,.4)" alt="avatar"/>' : '<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);display:flex;align-items:center;justify-content:center;font-size:18px">'+esc(S.user.avi)+'</div>')+
+          '<div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.2);border:2px solid rgba(255,255,255,.4);display:flex;align-items:center;justify-content:center;font-size:18px">'+esc(S.user.avi)+'</div>'+
           '<div style="font-size:13px;font-weight:700;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.5)">'+esc(S.user.name||'Your Name')+'</div>'+
         '</div>'+
       '</div>'+
@@ -8443,6 +8503,14 @@ function openModal(type,data){
       '<div id="fp-sent" style="display:none;background:rgba(22,163,74,.08);border:1px solid rgba(22,163,74,.2);border-radius:var(--radius);padding:10px 12px;font-size:12px;color:var(--green);margin-top:8px">✓ Reset link sent — check your inbox</div>'+
       '<div class="modal-actions">'+cancel+'<button class="btn-mok" onclick="handleForgotPassword()">SEND RESET LINK</button></div>'+
       '<div style="text-align:center;margin-top:10px;font-size:12px"><a href="#" onclick="closeModal();openModal(\'login\')" style="color:var(--accent);font-weight:600">Back to login →</a></div>';
+
+  } else if(type==='reset-password'){
+    h='<div class="modal-title">SET NEW PASSWORD</div>'+
+      '<div class="modal-sub">Enter your new password below.</div>'+
+      '<div class="modal-field"><div class="field-label">NEW PASSWORD <span style="font-size:9px;color:var(--text4);font-weight:400">(min 8 characters)</span></div><input type="password" id="m-rp-pw" placeholder="New password"/></div>'+
+      '<div class="modal-field"><div class="field-label">CONFIRM PASSWORD</div><input type="password" id="m-rp-pw2" placeholder="Repeat password"/></div>'+
+      '<div id="rp-err" style="display:none;background:rgba(201,24,74,.08);border:1px solid rgba(201,24,74,.2);border-radius:var(--radius);padding:10px 12px;font-size:12px;color:var(--accent);margin-top:8px"></div>'+
+      '<div class="modal-actions">'+cancel+'<button class="btn-mok" onclick="handleResetPassword()">SET PASSWORD</button></div>';
 
   } else if(type==='terms'){
     h='<div class="modal-title">TERMS OF SERVICE</div>'+
@@ -8861,7 +8929,17 @@ function openModal(type,data){
 // Accounts are stored as an array of {email, handle, name, pwHash, createdAt}
 // pwHash uses the same hashPass() function used for admin passwords.
 function getAccounts(){
-  try{ var r=localStorage.getItem(ACCOUNTS_KEY); return r?JSON.parse(r):[]; }catch(e){ return []; }
+  try{
+    var r=localStorage.getItem(ACCOUNTS_KEY);
+    if(!r) return [];
+    var parsed=JSON.parse(r);
+    if(Array.isArray(parsed)) return parsed;
+    // Migrate object format → array
+    var arr=[];
+    Object.keys(parsed).forEach(function(k){ var a=parsed[k]; if(a&&typeof a==='object'){ if(!a.handle) a.handle='@'+k; arr.push(a); } });
+    try{ localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(arr)); }catch(e){}
+    return arr;
+  }catch(e){ return []; }
 }
 function saveAccounts(arr){
   try{ localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(arr)); }catch(e){}
@@ -9144,60 +9222,48 @@ function handleLogin(){
   if(!raw){ showErr('Please enter your email or username'); return; }
   if(!pw) { showErr('Please enter your password'); return; }
 
-  // Determine if user entered an email or a @handle / bare handle
-  var acct = null;
-  var isHandleEntry = raw.indexOf('@') === 0 || raw.indexOf('@') === -1 && raw.indexOf('.') === -1;
+  // Disable button while loading
+  var loginBtn = document.querySelector('#modal-overlay .btn-mok');
+  if(loginBtn){ loginBtn.disabled = true; loginBtn.textContent = 'LOGGING IN…'; }
 
-  if(!isHandleEntry && raw.indexOf('@') > 0){
-    // Looks like an email
-    acct = findAccountByEmail(raw.toLowerCase());
-    if(!acct){
-      showErr('No account found with that email. Need one? Sign up for free →');
-      return;
-    }
-  } else {
-    // Treat as a handle — strip leading @ if present, lowercase
-    var handleInput = raw.replace(/^@/,'').toLowerCase().trim();
-    acct = findAccountByHandle(handleInput);
-    if(!acct){
-      showErr('No account found with that username. Check the spelling or sign up →');
-      return;
-    }
-  }
-
-  if(hashPass(pw) !== acct.pwHash){
-    _loginAttempts++;
-    if(_loginAttempts >= 5){
-      _loginLockedUntil = Date.now() + 15 * 60 * 1000;
-      _loginAttempts = 0;
-      showErr('Too many failed attempts. Account locked for 15 minutes.');
-    } else {
-      showErr('Incorrect password. (' + (5 - _loginAttempts) + ' attempts remaining)');
-    }
-    pwEl.value=''; pwEl.focus();
-    return;
-  }
-  _loginAttempts = 0; _loginLockedUntil = 0;
-
-  // Restore account data into S.user
-  S.user.name     = acct.name    || acct.handle || 'StyleFan';
-  S.user.handle   = acct.handle  || ('@'+raw.replace(/^@/,''));
-  S.user.avi      = acct.avi     || '😎';
-  S.user.bio      = acct.bio     || 'Fashion is my language ✦';
-  S.user.bannerBg   = acct.bannerBg   || 'gradient-default';
-  S.user.bannerPhoto= acct.bannerPhoto || null;
-
-  // Capture state from saved address for geo-blocking
-  if(S.savedAddress && S.savedAddress.state) S._userState = S.savedAddress.state;
-
-  // ── Server login (async, non-blocking) ──
-  api('POST', '/api/auth/login', { email: acct.email || raw, password: pw })
-    .then(function(data) { if (data.user) syncServerUser(data.user); })
-    .catch(function(err) { console.log('Server login:', err.message || err); });
-
-  _pendingLogin = { name: S.user.name, handle: S.user.handle, isNew: false, email: acct.email };
-  closeModal();
-  setTimeout(function(){ openModal('device-choice'); }, 120);
+  // ── Server-first login: server verifies password with bcrypt ──
+  api('POST', '/api/auth/login', { email: raw, password: pw })
+    .then(function(data) {
+      if(!data.user){ showErr('Login failed — please try again'); return; }
+      _loginAttempts = 0; _loginLockedUntil = 0;
+      syncServerUser(data.user);
+      // Capture state from saved address for geo-blocking
+      if(S.savedAddress && S.savedAddress.state) S._userState = S.savedAddress.state;
+      _pendingLogin = {
+        name: data.user.display_name || data.user.handle || 'StyleFan',
+        handle: '@' + (data.user.handle || '').replace('@',''),
+        isNew: false,
+        email: data.user.email || raw
+      };
+      closeModal();
+      setTimeout(function(){ openModal('device-choice'); }, 120);
+    })
+    .catch(function(err) {
+      if(loginBtn){ loginBtn.disabled = false; loginBtn.textContent = 'LOG IN'; }
+      var msg = (err && err.message) || 'Login failed';
+      if(err && err.status === 401){
+        _loginAttempts++;
+        if(_loginAttempts >= 5){
+          _loginLockedUntil = Date.now() + 15 * 60 * 1000;
+          _loginAttempts = 0;
+          showErr('Too many failed attempts. Account locked for 15 minutes.');
+        } else {
+          showErr('Incorrect password. (' + (5 - _loginAttempts) + ' attempts remaining)');
+        }
+        pwEl.value=''; pwEl.focus();
+      } else if(err && err.status === 404){
+        showErr('No account found. Check your email/username or sign up for free →');
+      } else if(err && err.status === 429){
+        showErr('Too many login attempts. Please try again in 15 minutes.');
+      } else {
+        showErr(msg);
+      }
+    });
 }
 
 function handleSignup(){
@@ -9292,35 +9358,35 @@ function handleSignup(){
     }catch(e){}
   }
 
-  // Create and store the regular account
-  var newAcct = {
-    email:     email,
-    handle:    handle,
-    name:      name,
-    pwHash:    hashPass(pw),
-    avi:       '😎',
-    bio:       'Fashion is my language ✦',
-    bannerBg:  'gradient-default',
-    isSeller:  isSeller,
-    createdAt: Date.now()
-  };
-  var accts = getAccounts();
-  accts.push(newAcct);
-  saveAccounts(accts);
-  registerHandle(handle);
+  // Create account on server (API-first)
+  var signupBtn = document.querySelector('#modal-overlay .btn-mok');
+  if(signupBtn){ signupBtn.disabled = true; signupBtn.textContent = 'CREATING ACCOUNT…'; }
 
-  // ── Server signup (async, non-blocking) ──
   api('POST', '/api/auth/signup', {
     email: email, password: pw, handle: cleanHandle, displayName: name
   }).then(function(data) {
     if (data.user) syncServerUser(data.user);
-  }).catch(function(err) {
-    console.log('Server signup:', err.message || err);
-  });
+    // Also store locally for backward compat during migration
+    var newAcct = {
+      email: email, handle: handle, name: name,
+      pwHash: hashPass(pw), avi: '😎', bio: 'Fashion is my language ✦',
+      bannerBg: 'gradient-default', isSeller: isSeller, createdAt: Date.now()
+    };
+    var accts = getAccounts(); accts.push(newAcct); saveAccounts(accts);
+    registerHandle(handle);
 
-  _pendingLogin = { name: name, handle: handle, isNew: true, email: email, referralCode: refCode, isSeller: isSeller };
-  closeModal();
-  setTimeout(function(){ openModal('device-choice'); }, 120);
+    _pendingLogin = { name: name, handle: handle, isNew: true, email: email, referralCode: refCode, isSeller: isSeller };
+    closeModal();
+    setTimeout(function(){ openModal('device-choice'); }, 120);
+  }).catch(function(err) {
+    if(signupBtn){ signupBtn.disabled = false; signupBtn.textContent = 'CREATE ACCOUNT'; }
+    var msg = (err && err.message) || 'Signup failed';
+    if(err && err.status === 409){
+      showErr('An account with that email or username already exists. Try logging in →');
+    } else {
+      showErr(msg);
+    }
+  });
 }
 function checkSellerCodeUI(){
   var codeEl = document.getElementById('m-signup-seller-code');
@@ -9564,7 +9630,7 @@ function clearAviPhoto(){
   S.user.aviPhoto=null;
   var hid=document.getElementById('m-ep-aviphoto');if(hid)hid.value='__CLEAR__';
   var prev=document.getElementById('avi-preview');
-  if(prev){prev.innerHTML=(S.user.avi && S.user.avi.startsWith && S.user.avi.startsWith('http')) ? '<img src="'+esc(S.user.avi)+'" style="width:60px;height:60px;border-radius:50%;object-fit:cover" alt="avatar"/>' : '<span style="font-size:26px">'+esc(S.user.avi)+'</span>';}
+  if(prev){prev.innerHTML='<span style="font-size:26px">'+esc(S.user.avi)+'</span>';}
   saveSession(getSessionType());renderCrewNavTab();renderCrew();
   openModal('edit-profile');
 }
@@ -9765,9 +9831,43 @@ function handleForgotPassword(){
   var el=document.getElementById('m-fp-email');
   if(!el||!el.value.trim()||el.value.indexOf('@')<0){showToast('Please enter a valid email address');return;}
   el.disabled=true;
-  var sent=document.getElementById('fp-sent');
-  if(sent) sent.style.display='';
-  showToast('Reset link sent to '+el.value.trim()+' — check your inbox');
+  api('POST', '/api/auth/forgot-password', { email: el.value.trim().toLowerCase() })
+    .then(function(){
+      var sent=document.getElementById('fp-sent');
+      if(sent) sent.style.display='';
+      showToast('Reset link sent to '+el.value.trim()+' — check your inbox');
+    })
+    .catch(function(err){
+      el.disabled=false;
+      // Don't reveal whether email exists — always show success for security
+      var sent=document.getElementById('fp-sent');
+      if(sent) sent.style.display='';
+      showToast('If an account exists with that email, a reset link has been sent');
+    });
+}
+function handleResetPassword(){
+  var pw = (document.getElementById('m-rp-pw')||{}).value||'';
+  var pw2 = (document.getElementById('m-rp-pw2')||{}).value||'';
+  var errEl = document.getElementById('rp-err');
+  function showErr(msg){ if(errEl){errEl.textContent=msg;errEl.style.display='block';} }
+  if(pw.length < 8){ showErr('Password must be at least 8 characters'); return; }
+  if(pw !== pw2){ showErr('Passwords do not match'); return; }
+  if(!window._resetToken){ showErr('Invalid reset link — please request a new one'); return; }
+  api('POST', '/api/auth/reset-password', { token: window._resetToken, newPassword: pw })
+    .then(function(data){
+      window._resetToken = null;
+      if(data.user) syncServerUser(data.user);
+      closeModal();
+      if(data.user){
+        doLogin(data.user.display_name || 'User', '@' + (data.user.handle||'').replace('@',''), 'permanent');
+        showToast('Password reset successful — you\'re now logged in ✓');
+      } else {
+        showToast('Password reset successful — please log in with your new password');
+      }
+    })
+    .catch(function(err){
+      showErr((err && err.message) || 'Reset failed — the link may have expired. Request a new one.');
+    });
 }
 function closeModal(){document.getElementById('modal-overlay').classList.remove('open');}
 
@@ -9816,11 +9916,16 @@ function selectPayMethod(id, total){
 
   if(id === 'stripe'){
     detail.innerHTML = '<div class="pay-method-detail">'+
-      '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">Card details are entered securely via Stripe at order completion.</div>'+
+      '<div id="stripe-element-container" style="margin-bottom:10px">'+
+        '<div style="text-align:center;padding:18px 0;color:var(--text4);font-size:11px">Loading secure payment form…</div>'+
+      '</div>'+
       '<div style="display:flex;gap:6px;flex-wrap:wrap">'+
         '<span style="background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:3px 8px;font-size:10px;color:var(--text3)">🔒 SSL Encrypted</span>'+
         '<span style="background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:3px 8px;font-size:10px;color:var(--text3)">PCI Compliant</span>'+
-      '</div></div>';
+      '</div>'+
+      '<div id="stripe-card-errors" style="color:#ef4444;font-size:11px;margin-top:8px;display:none"></div>'+
+    '</div>';
+    _mountStripeElement(total);
   } else if(id === 'wallet'){
     detail.innerHTML = '<div class="pay-method-detail">You\'ll be redirected to Wallet to complete your payment securely. Your order details will be saved.</div>';
   } else if(id === 'stylepoints'){
@@ -9853,6 +9958,68 @@ function applyStylePoints(total){
 
 // Legacy alias kept for any inline calls
 function applyCashBack(total){ applyStylePoints(total); }
+
+// ── Mount Stripe Payment Element ──
+function _mountStripeElement(total){
+  if(!_stripe){
+    var container = document.getElementById('stripe-element-container');
+    if(container) container.innerHTML = '<div style="padding:14px;font-size:11px;color:#ef4444;text-align:center">Stripe not loaded. Check your publishable key.</div>';
+    return;
+  }
+  // Create a PaymentIntent on the backend
+  var mktItems = S.cart.filter(function(p){return p.type==='marketplace';});
+  var mktTotal = mktItems.reduce(function(a,p){return a+p.price*(p.qty||1);},0);
+  var mktShipping = mktTotal>=100?0:8.99;
+  var mktTax = Math.round(mktTotal*0.08*100)/100;
+  var chargeAmount = Math.round((mktTotal+mktShipping+mktTax)*100); // cents
+
+  api('POST', '/api/payments/create-intent', { amount: chargeAmount, currency: 'usd' })
+    .then(function(data){
+      if(!data.client_secret){
+        var c = document.getElementById('stripe-element-container');
+        if(c) c.innerHTML = '<div style="padding:14px;font-size:11px;color:#ef4444;text-align:center">Could not initialize payment. Please try again.</div>';
+        return;
+      }
+      _stripeClientSecret = data.client_secret;
+      var appearance = {
+        theme: 'night',
+        variables: {
+          colorPrimary: '#c9184a',
+          colorBackground: '#1a1a1a',
+          colorText: '#e5e5e5',
+          colorDanger: '#ef4444',
+          fontFamily: '"Inter", system-ui, sans-serif',
+          borderRadius: '8px',
+          spacingUnit: '4px'
+        },
+        rules: {
+          '.Input': { border: '1px solid #333', backgroundColor: '#111' },
+          '.Input:focus': { borderColor: '#c9184a', boxShadow: '0 0 0 1px #c9184a' },
+          '.Label': { fontSize: '11px', fontWeight: '600', letterSpacing: '0.5px', textTransform: 'uppercase' }
+        }
+      };
+      _stripeElements = _stripe.elements({ clientSecret: _stripeClientSecret, appearance: appearance });
+      _stripePaymentElement = _stripeElements.create('payment', {
+        layout: { type: 'tabs', defaultCollapsed: false }
+      });
+      var container = document.getElementById('stripe-element-container');
+      if(container){
+        container.innerHTML = '';
+        _stripePaymentElement.mount(container);
+      }
+      _stripePaymentElement.on('change', function(event){
+        var errEl = document.getElementById('stripe-card-errors');
+        if(errEl){
+          if(event.error){ errEl.textContent = event.error.message; errEl.style.display = 'block'; }
+          else { errEl.style.display = 'none'; }
+        }
+      });
+    })
+    .catch(function(err){
+      var c = document.getElementById('stripe-element-container');
+      if(c) c.innerHTML = '<div style="padding:14px;font-size:11px;color:#ef4444;text-align:center">'+(err.message||'Payment setup failed. Try again.')+'</div>';
+    });
+}
 
 // ─────────────────────── ACCOUNT SETTINGS PANEL ─────────────────────────
 function openAccountPanel(){
@@ -9970,7 +10137,7 @@ function renderAccountPanel(){
     // ── Security ──
     '<div class="account-section">'+
       '<div class="account-section-title">Security</div>'+
-      '<div class="account-field"><label>Current Password</label><input id="ac-pw-current" type="password" placeholder="Enter current password"/></div>'+
+      (function(){ var _isSocial = !!(S._serverUserId && !S.user._hasPassword); return _isSocial ? '<div style="font-size:12px;color:var(--text4);margin-bottom:10px">You signed in with a social account. Set a password below to also enable email login.</div>' : '<div class="account-field"><label>Current Password</label><input id="ac-pw-current" type="password" placeholder="Enter current password"/></div>'; })()+
       '<div class="account-row">'+
         '<div class="account-field"><label>New Password</label><input id="ac-pw-new" type="password" placeholder="Min 8 characters"/></div>'+
         '<div class="account-field"><label>Confirm New</label><input id="ac-pw-confirm" type="password" placeholder="Repeat password"/></div>'+
@@ -10094,25 +10261,24 @@ function saveAccountPassword(){
   var cur  = (document.getElementById('ac-pw-current')||{}).value||'';
   var nw   = (document.getElementById('ac-pw-new')||{}).value||'';
   var conf = (document.getElementById('ac-pw-confirm')||{}).value||'';
-  if(!cur){ showToast('Enter your current password'); return; }
   if(nw.length < 8){ showToast('New password must be at least 8 characters'); return; }
   if(nw !== conf){ showToast('Passwords do not match'); return; }
-  var handle = (S.user.handle||'').replace('@','').toLowerCase();
-  var acct = findAccountByHandle(handle);
-  if(!acct){ showToast('Account not found'); return; }
-  if(acct.pwHash === '__social__'){ showToast('Password change not available for social login accounts'); return; }
-  if(acct.pwHash !== hashPass(cur)){ showToast('Current password is incorrect'); return; }
-  acct.pwHash = hashPass(nw);
-  var accounts = getAccounts();
-  for(var i=0;i<accounts.length;i++){
-    if((accounts[i].handle||'').toLowerCase().replace('@','')===handle){ accounts[i]=acct; break; }
-  }
-  saveAccounts(accounts);
-  ['ac-pw-current','ac-pw-new','ac-pw-confirm'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
-  showToast('Password updated successfully ✓');
-}
-  ['ac-pw-current','ac-pw-new','ac-pw-confirm'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
-  showToast('Password updated successfully ✓');
+
+  // API-first: server handles password verification and update
+  api('POST', '/api/auth/change-password', {
+    currentPassword: cur || null,
+    newPassword: nw
+  }).then(function(data){
+    ['ac-pw-current','ac-pw-new','ac-pw-confirm'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+    showToast(data.message || 'Password updated successfully ✓');
+  }).catch(function(err){
+    var msg = (err && err.message) || 'Password update failed';
+    if(err && err.status === 401){
+      showToast('Current password is incorrect');
+    } else {
+      showToast(msg);
+    }
+  });
 }
 
 function toggleAccountPref(key, btnId){
@@ -10148,10 +10314,10 @@ function executeDeleteAccount(){
   var inp = document.getElementById('del-confirm');
   if(!inp||inp.value.trim()!==S.user.handle){ showToast('Username doesn\'t match — account not deleted'); return; }
   // Remove from accounts store
-  var accounts = JSON.parse(localStorage.getItem('outfitd_accounts_v1')||'{}');
+  var accounts = getAccounts();
   var handle = (S.user.handle||'').replace('@','').toLowerCase();
-  delete accounts[handle];
-  localStorage.setItem('outfitd_accounts_v1', JSON.stringify(accounts));
+  accounts = accounts.filter(function(a){ return (a.handle||'').replace('@','').toLowerCase() !== handle; });
+  saveAccounts(accounts);
   // Remove from handles list
   var handles = JSON.parse(localStorage.getItem('outfitd_registered_handles')||'[]');
   handles = handles.filter(function(h){ return h.toLowerCase() !== handle; });
@@ -10410,7 +10576,7 @@ function submitReturnRequest(){
 // ─────────────────────── SOCIAL LOGIN ─────────────────────────────────────
 // ⚠️  TO ACTIVATE: replace the placeholder strings below with real credentials
 // Google Client ID → https://console.cloud.google.com → APIs & Services → Credentials
-var GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID'; fetch(API_URL + '/api/auth/google-config').then(function(r){return r.json();}).then(function(d){if(d.clientId){GOOGLE_CLIENT_ID=d.clientId;handleGoogleLogin();}}).catch(function(){});
+var GOOGLE_CLIENT_ID  = '960585564840-nl7s1vu2k2nktt30qur3k4nc3rgbo7k8.apps.googleusercontent.com';
 
 var GOOGLE_SVG = '<svg width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.707A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.707V4.961H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.039l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.96L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58z"/></svg>';
 
@@ -10436,70 +10602,72 @@ function injectSocialButtons(type) {
 
 function handleGoogleLogin() {
   if (GOOGLE_CLIENT_ID === 'YOUR_GOOGLE_CLIENT_ID') {
-    showToast('Google login not configured yet — add your Client ID to enable it');
+    showToast('Google login not configured yet \u2014 add your Client ID to enable it');
     return;
   }
   if (typeof google === 'undefined' || !google.accounts) {
     showToast('Google Sign-In failed to load. Check your connection.');
     return;
   }
-  google.accounts.id.initialize({
+  var client = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    callback: function(response) {
-      try {
-        var payload = JSON.parse(atob(response.credential.split('.')[1]));
-        var email   = payload.email || '';
-        var name    = payload.name  || payload.given_name || 'User';
+    scope: 'email profile',
+    callback: function(tokenResponse) {
+      if (!tokenResponse || !tokenResponse.access_token) {
+        showToast('Google sign-in was cancelled.');
+        return;
+      }
+      fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: 'Bearer ' + tokenResponse.access_token }
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(payload) {
+        var email    = payload.email || '';
+        var name     = payload.name || payload.given_name || 'User';
         var socialId = 'google_' + (payload.sub || email);
-
-        // ── Server Google auth (async) ──
-        api('POST', '/api/auth/google', { credential: response.credential })
-          .then(function(data) { if (data.user) syncServerUser(data.user); })
-          .catch(function(err) { console.log('Server Google auth:', err.message || err); });
-
-        _processSocialAuth(email, name, socialId, 'Google');
-      } catch(e) { showToast('Google sign-in failed. Please try again.'); }
-    },
-    auto_select: false,
-    cancel_on_tap_outside: true
+        api('POST', '/api/auth/google', { credential: tokenResponse.access_token, tokenFlow: true, email: email, name: name, sub: payload.sub })
+          .then(function(data) {
+            if (data.user) {
+              syncServerUser(data.user);
+              closeModal();
+              doLogin(data.user.display_name || name, '@' + (data.user.handle || '').replace('@',''), 'permanent');
+              S.user.email = data.user.email || email;
+              showToast('Welcome' + (data.isNew ? ' to Outfitd' : ' back') + ', ' + (data.user.display_name || name) + '! Signed in with Google \u2713');
+              if(data.isNew) addInstantOP(WELCOME_OP, 'Welcome bonus');
+            }
+          })
+          .catch(function(err) {
+            console.log('Server Google auth:', err.message || err);
+            _processSocialAuth(email, name, socialId, 'Google');
+          });
+      })
+      .catch(function(e) { showToast('Google sign-in failed. Please try again.'); });
+    }
   });
-  // Render a hidden Google button and click it (works in Safari)
-  var tmp = document.createElement('div');
-  tmp.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
-  tmp.id = 'g-btn-tmp';
-  document.body.appendChild(tmp);
-  google.accounts.id.renderButton(tmp, { type: 'standard', size: 'large' });
-  setTimeout(function() {
-    var btn = tmp.querySelector('[role="button"]') || tmp.querySelector('div[style]');
-    if (btn) btn.click();
-    setTimeout(function() { tmp.remove(); }, 5000);
-  }, 300);
+  client.requestAccessToken();
 }
 
 function _processSocialAuth(email, name, socialId, providerLabel) {
   closeModal();
-  var accounts = JSON.parse(localStorage.getItem('outfitd_accounts_v1') || '{}');
+  var accounts = getAccounts();
   // Try to find existing account by socialId or email
-  var existingKey = null;
-  Object.keys(accounts).forEach(function(k) {
-    var a = accounts[k];
-    if (a.socialId === socialId || (email && a.email === email)) existingKey = k;
-  });
+  var existing = null;
+  for(var i=0;i<accounts.length;i++){
+    var a = accounts[i];
+    if (a.socialId === socialId || (email && (a.email||'').toLowerCase() === email.toLowerCase())) { existing = a; break; }
+  }
 
-  if (existingKey) {
-    // Existing user — log them in
-    var acct = accounts[existingKey];
-    _finishSocialLogin(acct, existingKey);
-    showToast('Welcome back, ' + (acct.name || existingKey) + '! Signed in with ' + providerLabel + ' ✓');
+  if (existing) {
+    _finishSocialLogin(existing, (existing.handle||'').replace('@',''));
+    showToast('Welcome back, ' + (existing.name || existing.handle) + '! Signed in with ' + providerLabel + ' ✓');
   } else {
-    // New user — auto-create account
-    var base = '@' + name.split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'user';
+    var base = '@' + (name.split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '') || 'user');
     var handle = base, n = 1;
     while (isHandleTaken(handle.replace('@', ''))) { handle = base + n; n++; }
     var clean = handle.replace('@', '');
-    var newAcct = { handle: clean, name: name, email: email, pwHash: '__social__', socialId: socialId, createdAt: Date.now() };
-    accounts[clean.toLowerCase()] = newAcct;
-    localStorage.setItem('outfitd_accounts_v1', JSON.stringify(accounts));
+    var newAcct = { handle: '@'+clean, name: name, email: email, pwHash: '__social__', socialId: socialId, avi: '😎', bio: 'Fashion is my language ✦', bannerBg: 'gradient-default', createdAt: Date.now() };
+    accounts.push(newAcct);
+    saveAccounts(accounts);
     registerHandle(clean);
     _finishSocialLogin(newAcct, clean);
     addInstantOP(WELCOME_OP, 'Welcome bonus');
@@ -10508,15 +10676,9 @@ function _processSocialAuth(email, name, socialId, providerLabel) {
 }
 
 function _finishSocialLogin(acct, handle) {
-  S.loggedIn       = true;
-  S.user.handle    = '@' + handle;
-  S.user.name      = acct.name  || handle;
   S.user.email     = acct.email || null;
   S.loginStreak    = S.loginStreak || 0;
-  // state is persisted server-side via JWT cookies
-  updateAuthUI();
-  renderActiveTab();
-  updateStreakBadge();
+  doLogin(acct.name || handle, '@' + handle, 'permanent');
 }
 // ─────────────────────── END SOCIAL LOGIN ─────────────────────────────────
 function maybeClose(e){if(e.target.id==='modal-overlay')closeModal();}
