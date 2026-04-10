@@ -3050,7 +3050,7 @@ function subscribeTier(tierId){
     showToast(tier.icon+' '+tier.name+' plan activated!');
     return;
   }
-  showToast('Redirecting to Stripe checkout…');
+  if(tierId==='insider'){window.location.href='https://buy.stripe.com/test_dRmeV6fu22iIfGq2bydEs00';return;}showToast('Redirecting to Stripe checkout…');
   api('POST', '/api/subscriptions/checkout', { tier: tierId })
     .then(function(data){
       if(data.url) window.location.href = data.url;
