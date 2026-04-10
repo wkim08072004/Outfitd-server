@@ -51,6 +51,7 @@ const { guestSessionMiddleware } = require("./middleware/guestSession");
 app.use("/api/payments", require("./routes/payments"));
 app.use("/api/paypal", require("./routes/paypal"));
 app.use("/api/seller-invite", require("./routes/seller-invite"));
+app.use("/api/stripe-connect", require("./routes/stripe-connect"));
 app.use("/api", guestSessionMiddleware);
 
 
