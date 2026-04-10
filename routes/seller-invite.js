@@ -12,7 +12,7 @@ router.post('/send', async (req, res) => {
     }
 
     await resend.emails.send({
-      from: 'Outfitd <onboarding@resend.dev>',
+      from: 'Outfitd <noreply@outfitd.co>',
       to: email,
       subject: '🎉 Your OUTFITD Seller Application Has Been Approved!',
       html: `

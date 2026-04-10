@@ -25,7 +25,7 @@ router.post('/send', async (req, res) => {
     const verifyUrl = (process.env.FRONTEND_URL || 'https://outfitd.co') + '?verify=' + verifyToken;
 
     await resend.emails.send({
-      from: 'Outfitd <onboarding@resend.dev>',
+      from: 'Outfitd <noreply@outfitd.co>',
       to: user.email,
       subject: 'Verify your Outfitd email',
       html: '<div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px">' +
