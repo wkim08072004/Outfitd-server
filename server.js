@@ -50,6 +50,7 @@ app.use(express.json({ limit: '2mb' }));
 const { guestSessionMiddleware } = require("./middleware/guestSession");
 app.use("/api/payments", require("./routes/payments"));
 app.use("/api/paypal", require("./routes/paypal"));
+app.use("/api/seller-invite", require("./routes/seller-invite"));
 app.use("/api", guestSessionMiddleware);
 
 
