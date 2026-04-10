@@ -49,6 +49,7 @@ app.use(express.json({ limit: '2mb' }));
 // Guest session limits
 const { guestSessionMiddleware } = require("./middleware/guestSession");
 app.use("/api/payments", require("./routes/payments"));
+app.use("/api/paypal", require("./routes/paypal"));
 app.use("/api", guestSessionMiddleware);
 
 
