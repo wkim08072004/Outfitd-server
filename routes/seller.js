@@ -30,7 +30,52 @@ function requireSeller(req, res, next) {
   }
   next();
 }
+// GET /api/seller/listings — Fetch seller's own listings
+router.get('/listings', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('listings').select('*').eq('seller_id', req.user.id).order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ listings: data || [] });
+  } catch (err) { res.status(500).json({ error: 'Failed to fetch listings' }); }
+});
 
+// GET /api/seller/listings/all — All active listings (public)
+router.get('/listings/all', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('listings').select('*').eq('status', 'active').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    const result = (data || []).map(l => ({
+      id: l.id, name: l.name, brand: l.brand || l.seller_name || 'Seller', sellerName: l.seller_name, sellerEmail: l.seller_email, sellerId: l.seller_id, category: l.category, price: parseFloat(l.price), size: l.size || ['S','M','L'], color: l.color, emoji: l.emoji || '👕', desc: l.description, style: l.style, condition: l.condition, returnWindow: l.return_window, shipDays: l.ship_days, photos: l.photos || [], photo: (l.photos && l.photos[0]) || null, stock: l.stock, sold: l.sold, createdAt: new Date(l.created_at).getTime()
+    }));
+    res.json({ listings: result });
+  } catch (err) { res.status(500).json({ error: 'Failed to fetch listings' }); }
+});
+
+// POST /api/seller/listings — Create listing
+router.post('/listings', requireAuth, async (req, res) => {
+  try {
+    const { name, brand, category, price, size, color, emoji, desc, style, condition, returnWindow, shipDays, photos, stock } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
+    if (!price || price <= 0) return res.status(400).json({ error: 'Valid price required' });
+    const { data: user } = await supabase.from('users').select('handle, email').eq('id', req.user.id).single();
+    const { data, error } = await supabase.from('listings').insert({
+      seller_id: req.user.id, seller_email: user?.email || '', seller_name: brand || user?.handle || 'Seller', name: name.trim().slice(0, 100), brand: brand || user?.handle || 'Seller', category: category || 'Tops', price: parseFloat(price), size: Array.isArray(size) ? size : (size ? String(size).split(',').map(s => s.trim()).filter(Boolean) : ['S','M','L']), color: color || 'Black', emoji: emoji || '👕', description: (desc || '').slice(0, 500), style: style || 'Streetwear', condition: condition || 'New', return_window: returnWindow || '30 days', ship_days: shipDays || '3-7', photos: photos || [], stock: parseInt(stock) || 1
+    }).select().single();
+    if (error) throw error;
+    res.json({ listing: data });
+  } catch (err) { res.status(500).json({ error: 'Failed to create listing' }); }
+});
+
+// DELETE /api/seller/listings/:id
+router.delete('/listings/:id', requireAuth, async (req, res) => {
+  try {
+    const { data: existing } = await supabase.from('listings').select('seller_id').eq('id', req.params.id).single();
+    if (!existing || existing.seller_id !== req.user.id) return res.status(403).json({ error: 'Not your listing' });
+    const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: 'Failed to delete listing' }); }
+});
 // ═══════════════════════════════════════════════════════════════
 // POST /api/seller/apply — Submit seller application
 // ═══════════════════════════════════════════════════════════════
