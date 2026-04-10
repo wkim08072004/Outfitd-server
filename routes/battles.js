@@ -23,7 +23,41 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
-
+// ═══════════════════════════════════════════════════════════
+// GET /api/battles — Fetch all battles
+// ═══════════════════════════════════════════════════════════
+router.get('/', async (req, res) => {
+  try {
+    const { data: battles, error } = await supabase
+      .from('battles')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    const result = (battles || []).map(b => ({
+      id: b.id,
+      challenger: {
+        handle: b.challenger_handle, avi: b.challenger_avi,
+        fit: b.challenger_fit || [], style: b.challenger_style,
+        cost: b.challenger_cost || 0, desc: b.challenger_desc || ''
+      },
+      opponent: b.opponent_handle ? {
+        handle: b.opponent_handle, avi: b.opponent_avi,
+        fit: b.opponent_fit || [], style: b.opponent_style,
+        cost: b.opponent_cost || 0, desc: b.opponent_desc || ''
+      } : null,
+      wager: b.wager, status: b.status,
+      deadline: b.deadline ? new Date(b.deadline).getTime() : null,
+      votes: { challenger: b.votes_challenger || 0, opponent: b.votes_opponent || 0 },
+      winner: b.winner, votedBy: {},
+      postedAt: new Date(b.created_at).getTime()
+    }));
+    res.json({ battles: result });
+  } catch (err) {
+    console.error('GET /api/battles error:', err);
+    res.status(500).json({ error: 'Failed to fetch battles' });
+  }
+});
 // ═══════════════════════════════════════════════════════════════
 // POST /api/battles/create — Issue a challenge
 // ═══════════════════════════════════════════════════════════════
