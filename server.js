@@ -48,6 +48,7 @@ app.use(express.json({ limit: '2mb' }));
 
 // Guest session limits
 const { guestSessionMiddleware } = require("./middleware/guestSession");
+app.use("/api/payments", require("./routes/payments"));
 app.use("/api", guestSessionMiddleware);
 
 
@@ -61,7 +62,6 @@ app.use('/api/user', require('./routes/user'));
 app.use('/api/seller', require('./routes/seller'));
 app.use('/api/posts', require('./routes/posts'));
 app.use('/api/orders', require('./routes/orders'));
-app.use('/api/payments', require('./routes/payments'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/ai', require('./routes/ai'));
 app.use('/api/verify', require('./routes/verify'));
