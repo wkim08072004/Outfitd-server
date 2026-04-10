@@ -73,7 +73,7 @@ app.use('/api/kyc', require('./routes/kyc'));
 app.use('/api/redeem', require('./routes/redeem'));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
+app.use('/api/products', require('./routes/products'));
 // Sentry error handler (must be after all routes)
 Sentry.setupExpressErrorHandler(app);
 
