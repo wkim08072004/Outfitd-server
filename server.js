@@ -44,8 +44,8 @@ app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
 // Parse cookies and JSON
 app.use(cookieParser());
 app.use('/api/webhooks', require('./routes/webhooks'));
-app.use(express.json({ limit: '2mb' }));
-
+app.use(express.json({ limit: '10mb' }));
+app.use('/api/upload', require('./routes/upload'));
 // Guest session limits
 const { guestSessionMiddleware } = require("./middleware/guestSession");
 app.use("/api/payments", require("./routes/payments"));
