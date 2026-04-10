@@ -27,7 +27,46 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Invalid token' });
   }
 }
+// GET /api/orders — Fetch user's order history
+router.get('/', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { data: orders, error } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('buyer_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (error) throw error;
 
+    const { data: user } = await supabase
+      .from('users').select('handle').eq('id', userId).single();
+    const buyerHandle = user?.handle ? ('@' + user.handle.replace('@','')) : '';
+
+    const result = (orders || []).map(o => {
+      const addr = o.shipping_address || {};
+      const addrStr = [addr.street, addr.city, addr.state, addr.zip].filter(Boolean).join(', ');
+      return {
+        id: o.id,
+        buyer: buyerHandle,
+        createdAt: new Date(o.created_at).getTime(),
+        status: o.status || 'awaiting_fulfillment',
+        items: [{ emoji: '📦', name: 'Order Item', brand: '', size: '', price: (o.total || 0) / 100 }],
+        paymentMethod: o.stripe_payment_id ? 'stripe' : 'stripe',
+        subtotal: (o.total || 0) / 100,
+        shipping: 0,
+        tax: 0,
+        total: (o.total || 0) / 100,
+        shippingAddress: addrStr,
+        trackingNumber: o.tracking_number || null
+      };
+    });
+    res.json({ orders: result });
+  } catch (err) {
+    console.error('GET /api/orders error:', err);
+    res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
 // ═══════════════════════════════════════════════════════════════
 // POST /api/orders/create
 // Creates order in DB + Stripe Checkout Session, returns checkout URL
