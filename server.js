@@ -134,13 +134,29 @@ app.use('/api/notifications', require('./routes/notifications'));
 // Seller status check (cross-browser sync)
 app.get('/api/user/seller-status', async (req, res) => {
   try {
-    // Get user from session cookie (same auth as /api/auth/me)
-    const token = req.cookies?.outfitd_session;
-    if (!token) return res.json({ is_seller: false });
+    const jwt = require('jsonwebtoken');
+    let userId;
+    // Check Authorization header first
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+        userId = decoded.userId;
+      } catch (e) {}
+    }
+    // Fall back to cookie
+    if (!userId) {
+      const token = req.cookies?.token;
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          userId = decoded.userId;
+        } catch (e) {}
+      }
+    }
+    if (!userId) return res.json({ is_seller: false });
     const supabase = req.app.locals.supabase;
-    const { data: session } = await supabase.from('sessions').select('user_id').eq('token', token).single();
-    if (!session) return res.json({ is_seller: false });
-    const { data: user } = await supabase.from('users').select('role').eq('id', session.user_id).single();
+    const { data: user } = await supabase.from('users').select('role').eq('id', userId).single();
     res.json({ is_seller: !!(user && user.role === 'seller') });
   } catch (err) {
     res.json({ is_seller: false });
