@@ -34,7 +34,7 @@ router.patch('/profile', requireAuth, async (req, res) => {
       .from('users')
       .update(updates)
       .eq('id', req.user.id)
-      .select(SAFE_SELECT)
+    .select('id, email, handle, display_name, role, avatar_url, bio, op_balance, store_credits, subscription, login_streak, referral_code')
       .single();
 
     if (error) throw error;
