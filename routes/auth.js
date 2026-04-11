@@ -15,7 +15,7 @@ function issueTokens(res, userId) {
     const cookieOpts = (maxAge) => ({
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+       sameSite: 'strict',
         maxAge
     });
 
@@ -156,22 +156,38 @@ router.post('/login', async (req, res) => {
 // ── GOOGLE OAUTH ────────────────────────────────────────
 router.post('/google', async (req, res) => {
   try {
-        const { credential } = req.body;
+        const { credential, tokenFlow, email: gEmail, name: gName, sub: gSub } = req.body;
         if (!credential) return res.status(400).json({ error: 'Missing Google credential' });
 
-        // Verify the Google ID token
-        const ticket = await googleClient.verifyIdToken({
-            idToken: credential,
+        let email, name, picture, socialId;
+
+        if (tokenFlow) {
+            // Token flow: frontend already fetched userinfo, verify by calling Google API
+            const userinfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: { Authorization: 'Bearer ' + credential }
+            });
+            if (!userinfoRes.ok) return res.status(401).json({ error: 'Invalid Google token' });
+            const payload = await userinfoRes.json();
+            email = payload.email;
+            name = payload.name || gName || 'User';
+            picture = payload.picture || '';
+            socialId = 'google_' + (payload.sub || email);
+        } else {
+            // ID token flow: verify with Google
+            const ticket = await googleClient.verifyIdToken({
+                idToken: credential,
             audience: process.env.GOOGLE_CLIENT_ID
         });
         const payload = ticket.getPayload();
-        const { sub, email, name, picture } = payload;
-        const socialId = 'google_' + sub;
-
+        email = payload.email;
+        name = payload.name;
+        picture = payload.picture;
+        socialId = 'google_' + payload.sub;
+        }
         // Check if user already exists (by social_id or email)
         const { data: existing } = await supabase
-            .select(SAFE_SELECT)
             .from('users')
+            .select(SAFE_SELECT)
             .or(`social_id.eq.${socialId},email.eq.${email.toLowerCase()}`)
             .limit(1);
 
