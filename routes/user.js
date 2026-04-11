@@ -30,15 +30,13 @@ router.patch('/profile', requireAuth, async (req, res) => {
     if (avatar_url !== undefined) updates.avatar_url = avatar_url;
     updates.updated_at = new Date().toISOString();
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('users')
       .update(updates)
-      .eq('id', req.user.id)
-    .select('id, email, handle, display_name, role, avatar_url, bio, op_balance, store_credits, subscription, login_streak, referral_code')
-      .single();
+      .eq('id', req.user.id);
 
     if (error) throw error;
-    res.json({ user: data });
+    res.json({ ok: true });
   } catch (err) {
     console.error('PATCH /api/user/profile error:', err);
     res.status(500).json({ error: 'Failed to update profile' });
