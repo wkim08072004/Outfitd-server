@@ -109,6 +109,7 @@ app.patch('/api/user/profile', async (req, res) => {
     if (avatar_url !== undefined) updates.avatar_url = avatar_url;
     if (req.body.banner_bg !== undefined) updates.banner_bg = req.body.banner_bg;
     if (req.body.banner_photo !== undefined) updates.banner_photo = req.body.banner_photo;
+    if (req.body.role === 'seller') updates.role = 'seller';
 
     const { error } = await supabase.from('users').update(updates).eq('id', userId);
     if (error) throw error;

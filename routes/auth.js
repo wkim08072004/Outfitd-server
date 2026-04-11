@@ -53,7 +53,7 @@ const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_
 // ── SIGNUP ──────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
-        const { email, password, handle, displayName } = req.body;
+        const { email, password, handle, displayName, isSeller } = req.body;
 
         if (!email || !password || !handle)
             return res.status(400).json({ error: 'Email, password and handle are required' });
@@ -90,7 +90,8 @@ router.post('/signup', async (req, res) => {
             handle: handle.toLowerCase().replace('@',''),
             display_name: displayName || handle,
             password_hash,
-            referral_code
+            referral_code,
+            role: isSeller ? 'seller' : 'user'
         })
         .select(SAFE_SELECT)
         .single();
