@@ -15,7 +15,8 @@ function issueTokens(res, userId) {
     const cookieOpts = (maxAge) => ({
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+       sameSite: 'none',
+secure: true,
         maxAge
     });
 
