@@ -61,42 +61,6 @@ app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/battles', require('./routes/battles'));
 app.use('/api/tournaments', require('./routes/tournaments'));
 app.use('/api/leaderboard', require('./routes/leaderboard'));
-
-// Profile sync (cross-browser/device) — must be before the user router
-app.patch('/api/user/profile', async (req, res) => {
-  try {
-    const token = req.cookies?.outfitd_session;
-    if (!token) return res.status(401).json({ error: 'Not authenticated' });
-    const supabase = req.app.locals.supabase;
-    const { data: session } = await supabase.from('sessions').select('user_id').eq('token', token).single();
-    if (!session) return res.status(401).json({ error: 'Invalid session' });
-    const userId = session.user_id;
-    const { display_name, handle, bio, avatar_url } = req.body;
-
-    if (handle !== undefined) {
-      const clean = handle.toLowerCase().replace('@', '').replace(/[^a-z0-9_]/g, '');
-      if (clean.length < 3 || clean.length > 20) return res.status(400).json({ error: 'Handle must be 3-20 characters' });
-      const reserved = ['admin','outfitd','support','moderator','system','official','staff','mod'];
-      if (reserved.some(r => clean.includes(r))) return res.status(400).json({ error: 'That username is reserved' });
-      const { data: existing } = await supabase.from('users').select('id').eq('handle', clean).neq('id', userId).maybeSingle();
-      if (existing) return res.status(409).json({ error: 'Username already taken' });
-    }
-
-    const updates = { updated_at: new Date().toISOString() };
-    if (display_name !== undefined) updates.display_name = display_name.slice(0, 50);
-    if (handle !== undefined) updates.handle = handle.toLowerCase().replace('@', '').replace(/[^a-z0-9_]/g, '');
-    if (bio !== undefined) updates.bio = bio.slice(0, 160);
-    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
-
-    const { error } = await supabase.from('users').update(updates).eq('id', userId);
-    if (error) throw error;
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Profile update error:', err);
-    res.status(500).json({ error: 'Failed to update profile' });
-  }
-});
-
 app.use('/api/user', require('./routes/user'));
 app.use('/api/seller', require('./routes/seller'));
 app.use('/api/posts', require('./routes/posts'));
@@ -124,7 +88,6 @@ app.get('/api/user/seller-status', async (req, res) => {
     res.json({ is_seller: false });
   }
 });
-
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/products', require('./routes/products'));
