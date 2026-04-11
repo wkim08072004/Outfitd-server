@@ -15,8 +15,7 @@ function issueTokens(res, userId) {
     const cookieOpts = (maxAge) => ({
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-       sameSite: 'none',
-secure: true,
+       sameSite: 'strict',
         maxAge
     });
 
@@ -300,7 +299,7 @@ router.post('/refresh', async (req, res) => {
         res.cookie('token', token, {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
-            sameSite: 'none', secure: true,
+            sameSite: 'strict',
             maxAge: 15 * 60 * 1000
         });
 
