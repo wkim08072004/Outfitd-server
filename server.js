@@ -72,6 +72,22 @@ app.use('/api/subscriptions', require('./routes/subscriptions'));
 app.use('/api/kyc', require('./routes/kyc'));
 app.use('/api/redeem', require('./routes/redeem'));
 app.use('/api/notifications', require('./routes/notifications'));
+
+// Seller status check (cross-browser sync)
+app.get('/api/user/seller-status', async (req, res) => {
+  try {
+    // Get user from session cookie (same auth as /api/auth/me)
+    const token = req.cookies?.outfitd_session;
+    if (!token) return res.json({ is_seller: false });
+    const supabase = req.app.locals.supabase;
+    const { data: session } = await supabase.from('sessions').select('user_id').eq('token', token).single();
+    if (!session) return res.json({ is_seller: false });
+    const { data: user } = await supabase.from('users').select('role').eq('id', session.user_id).single();
+    res.json({ is_seller: !!(user && user.role === 'seller') });
+  } catch (err) {
+    res.json({ is_seller: false });
+  }
+});
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/products', require('./routes/products'));
