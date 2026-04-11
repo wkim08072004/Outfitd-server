@@ -71,6 +71,7 @@ app.use('/api/verify', require('./routes/verify'));
 app.use('/api/subscriptions', require('./routes/subscriptions'));
 app.use('/api/kyc', require('./routes/kyc'));
 app.use('/api/redeem', require('./routes/redeem'));
+app.use('/api/notifications', require('./routes/notifications'));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/products', require('./routes/products'));
