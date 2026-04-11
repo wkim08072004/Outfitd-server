@@ -7,24 +7,48 @@ const { OAuth2Client } = require('google-auth-library');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// Helper: sign tokens & set cookies
+// Helper: sign tokens & set cookies + return tokens for localStorage auth
 function issueTokens(res, userId) {
-    const token = jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '15m' });
-    const refreshToken = jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const refreshToken = jwt.sign({ userId }, process.env.JWT_REFRESH_SECRET, { expiresIn: '30d' });
 
     const cookieOpts = (maxAge) => ({
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        secure: true,
+        sameSite: 'none',
         maxAge
     });
 
-    res.cookie('token', token, cookieOpts(15 * 60 * 1000));
-    res.cookie('refreshToken', refreshToken, cookieOpts(7 * 24 * 60 * 60 * 1000));
+    res.cookie('token', token, cookieOpts(7 * 24 * 60 * 60 * 1000));
+    res.cookie('refreshToken', refreshToken, cookieOpts(30 * 24 * 60 * 60 * 1000));
+
+    // Store on res so routes can include in response body
+    res._tokens = { token, refreshToken };
+}
+
+// Helper: extract userId from Authorization header or cookie
+function getUserIdFromRequest(req) {
+    // 1. Check Authorization header first (works cross-domain)
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        try {
+            const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+            return decoded.userId;
+        } catch (e) {}
+    }
+    // 2. Fall back to cookie
+    const token = req.cookies?.token;
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            return decoded.userId;
+        } catch (e) {}
+    }
+    return null;
 }
 
 // Safe user fields to return (never send password_hash)
-const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_balance, cash_balance, store_credits, subscription, login_streak, referral_code';
+const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_balance, cash_balance, store_credits, subscription, login_streak, referral_code, email_verified, banner_bg, banner_photo';
 
 // ── SIGNUP ──────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
@@ -74,7 +98,7 @@ router.post('/signup', async (req, res) => {
     if (error) throw error;
 
     issueTokens(res, user.id);
-    res.status(201).json({ user });
+    res.status(201).json({ user, token: res._tokens.token, refreshToken: res._tokens.refreshToken });
 
   } catch (err) {
     console.error('Signup error:', err);
@@ -145,7 +169,7 @@ router.post('/login', async (req, res) => {
         issueTokens(res, user.id);
 
         const { password_hash, ...safeUser } = user;
-        res.json({ user: safeUser });
+        res.json({ user: safeUser, token: res._tokens.token, refreshToken: res._tokens.refreshToken });
 
     } catch (err) {
         console.error('Login error:', err);
@@ -224,7 +248,7 @@ router.post('/google', async (req, res) => {
         await supabase.from('users').update({ last_login_date: today }).eq('id', user.id);
 
         issueTokens(res, user.id);
-        res.json({ user, isNew });
+        res.json({ user, isNew, token: res._tokens.token, refreshToken: res._tokens.refreshToken });
 
   } catch (err) {
     console.error('Google auth error:', err);
@@ -242,15 +266,13 @@ router.post('/logout', (req, res) => {
 // ── ME (get current user) ───────────────────────────────
 router.get('/me', async (req, res) => {
   try {
-        const token = req.cookies.token;
-        if (!token) return res.status(401).json({ error: 'Not logged in' });
-
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const userId = getUserIdFromRequest(req);
+        if (!userId) return res.status(401).json({ error: 'Not logged in' });
 
         const { data: user, error } = await supabase
             .from('users')
             .select(SAFE_SELECT)
-            .eq('id', decoded.userId)
+            .eq('id', userId)
             .single();
 
         if (error || !user) return res.status(401).json({ error: 'User not found' });
@@ -265,10 +287,22 @@ router.get('/me', async (req, res) => {
 // ── REFRESH TOKEN ───────────────────────────────────────
 router.post('/refresh', async (req, res) => {
   try {
-        const refreshToken = req.cookies.refreshToken;
-        if (!refreshToken) return res.status(401).json({ error: 'No refresh token' });
+        // Check Authorization header first, then cookie
+        let decoded;
+        const authHeader = req.headers.authorization;
+        const bodyRefresh = req.body?.refreshToken;
+        const cookieRefresh = req.cookies?.refreshToken;
+        const refreshToken = bodyRefresh || cookieRefresh;
 
-        const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            try {
+                decoded = jwt.verify(authHeader.slice(7), process.env.JWT_REFRESH_SECRET);
+            } catch (e) {}
+        }
+        if (!decoded && refreshToken) {
+            decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+        }
+        if (!decoded) return res.status(401).json({ error: 'No refresh token' });
 
         const { data: user } = await supabase
             .from('users')
@@ -278,16 +312,10 @@ router.post('/refresh', async (req, res) => {
 
         if (!user) return res.status(401).json({ error: 'User not found' });
 
-        // Issue new access token
-        const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '15m' });
-        res.cookie('token', token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            maxAge: 15 * 60 * 1000
-        });
+        // Issue new tokens
+        issueTokens(res, user.id);
 
-        res.json({ user });
+        res.json({ user, token: res._tokens.token, refreshToken: res._tokens.refreshToken });
   } catch (err) {
     res.clearCookie('token');
     res.clearCookie('refreshToken');
@@ -326,9 +354,8 @@ function clearAttempts(email) {
 // ── PASSWORD CHANGE ─────────────────────────────────────
 router.post('/change-password', async (req, res) => {
     try {
-        const token = req.cookies.token;
-        if (!token) return res.status(401).json({ error: 'Not logged in' });
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const userId = getUserIdFromRequest(req);
+        if (!userId) return res.status(401).json({ error: 'Not logged in' });
 
         const { currentPassword, newPassword } = req.body;
         if (!newPassword || newPassword.length < 8)
@@ -337,7 +364,7 @@ router.post('/change-password', async (req, res) => {
         const { data: user } = await supabase
             .from('users')
             .select('id, password_hash')
-            .eq('id', decoded.userId)
+            .eq('id', userId)
             .single();
 
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -390,7 +417,7 @@ router.post('/forgot-password', async (req, res) => {
           const { Resend } = require('resend');
           const resend = new Resend(process.env.RESEND_API_KEY);
           await resend.emails.send({
-            from: 'Outfitd <onboarding@resend.dev>',
+            from: 'Outfitd <noreply@outfitd.co>',
             to: user.email,
             subject: 'Reset your Outfitd password',
             html: `
@@ -458,9 +485,8 @@ router.post('/reset-password', async (req, res) => {
 // ── ACCOUNT DELETION ────────────────────────────────────
 router.post('/delete-account', async (req, res) => {
     try {
-        const token = req.cookies.token;
-        if (!token) return res.status(401).json({ error: 'Not logged in' });
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const userId = getUserIdFromRequest(req);
+        if (!userId) return res.status(401).json({ error: 'Not logged in' });
 
         const { password } = req.body;
         if (!password) return res.status(400).json({ error: 'Password required' });
@@ -468,7 +494,7 @@ router.post('/delete-account', async (req, res) => {
         const { data: user } = await supabase
             .from('users')
             .select('id, password_hash')
-            .eq('id', decoded.userId)
+            .eq('id', userId)
             .single();
 
         if (!user) return res.status(404).json({ error: 'User not found' });

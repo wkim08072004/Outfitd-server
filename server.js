@@ -68,25 +68,25 @@ app.patch('/api/user/profile', async (req, res) => {
     const supabase = req.app.locals.supabase;
     const { email, display_name, handle, bio, avatar_url } = req.body;
 
-    // Auth: verify JWT cookie (same as auth routes)
+    // Auth: check Authorization header first (works cross-domain), then cookie, then email fallback
     let userId;
-    const token = req.cookies?.token;
-    if (token) {
+    const jwt = require('jsonwebtoken');
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
       try {
-        const decoded = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
-        userId = decoded.userId;
-      } catch (e) {
-        // Token expired — try refresh
-      }
-    }
-    // Fallback: try refresh token
-    if (!userId && req.cookies?.refreshToken) {
-      try {
-        const decoded = require('jsonwebtoken').verify(req.cookies.refreshToken, process.env.JWT_REFRESH_SECRET);
+        const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
         userId = decoded.userId;
       } catch (e) {}
     }
-    // Last resort: email lookup
+    if (!userId) {
+      const token = req.cookies?.token;
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          userId = decoded.userId;
+        } catch (e) {}
+      }
+    }
     if (!userId && email) {
       const { data: user } = await supabase.from('users').select('id').eq('email', email.toLowerCase()).maybeSingle();
       if (user) userId = user.id;
