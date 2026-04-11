@@ -19,7 +19,31 @@ async function requireAdmin(req, res, next) {
   if (!user || user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
 }
+// PATCH /api/user/profile — Update user profile (cross-browser sync)
+router.patch('/profile', requireAuth, async (req, res) => {
+  try {
+    const { display_name, handle, bio, avatar_url } = req.body;
+    const updates = {};
+    if (display_name !== undefined) updates.display_name = display_name;
+    if (handle !== undefined) updates.handle = handle.replace('@', '');
+    if (bio !== undefined) updates.bio = bio;
+    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
+    updates.updated_at = new Date().toISOString();
 
+    const { data, error } = await supabase
+      .from('users')
+      .update(updates)
+      .eq('id', req.user.id)
+      .select(SAFE_SELECT)
+      .single();
+
+    if (error) throw error;
+    res.json({ user: data });
+  } catch (err) {
+    console.error('PATCH /api/user/profile error:', err);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
 // POST /api/orders/create
 router.post('/create', requireAuth, async (req, res) => {
   try {
