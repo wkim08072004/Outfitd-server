@@ -26,7 +26,7 @@ function requireAuth(req, res, next) {
   }
 }
 
-function optionalAuth(req, res, next) {
+function requireAuth(req, res, next) {
   const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
   if (token) {
     try { req.user = jwt.verify(token, process.env.JWT_SECRET); } catch (e) {}
@@ -115,7 +115,7 @@ router.get('/listings', requireAuth, async (req, res) => {
 });
 
 // POST /api/seller/listings — Create a listing
-router.post('/listings', optionalAuth, async (req, res) => {
+router.post('/listings', requireAuth, async (req, res) => {
   try {
     const {
       name, brand, category, price, size, color,
@@ -171,7 +171,7 @@ router.post('/listings', optionalAuth, async (req, res) => {
       sizes: Array.isArray(size) ? size : (size ? String(size).split(',').map(s => s.trim()).filter(Boolean) : ['S','M','L']),
       status: 'active'
     };
-
+const sellerId = req.user?.sub || null;
     // seller_id is nullable — include only if we have it
     if (sellerId) {
       insertData.seller_id = sellerId;
@@ -199,7 +199,7 @@ router.post('/listings', optionalAuth, async (req, res) => {
 });
 
 // DELETE /api/seller/listings/:id — Soft-delete a listing
-router.delete('/listings/:id', optionalAuth, async (req, res) => {
+router.delete('/listings/:id', requireAuth, async (req, res) => {
   try {
     const listingId = req.params.id;
     const cleanId = String(listingId).replace(/^(dyn_|sl_)/, '');
