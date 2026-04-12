@@ -15,7 +15,8 @@ function issueTokens(res, userId) {
     const cookieOpts = (maxAge) => ({
         httpOnly: true,
         secure: true,
-        sameSite: 'none',
+        sameSite: 'None',
+        path: '/',
         maxAge
     });
 
