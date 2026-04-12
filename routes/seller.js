@@ -85,6 +85,7 @@ router.get('/listings/all', async (req, res) => {
         style: meta.style || 'Streetwear',
         shipDays: meta.shipDays || '3-7',
         photoPosition: meta.photoPosition || 'center center',
+        photoFit: meta.photoFit || 'cover',
         badge: 'NEW',
         listedAt: new Date(row.created_at).getTime()
       };
@@ -120,7 +121,7 @@ router.post('/listings', optionalAuth, async (req, res) => {
       name, brand, category, price, size, color,
       emoji, desc, condition, returnWindow,
       photos, stock, style, shipDays, photoPosition,
-      localId, sellerEmail
+      photoFit, localId, sellerEmail
     } = req.body;
 
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'Name required' });
@@ -157,7 +158,8 @@ router.post('/listings', optionalAuth, async (req, res) => {
       sold: 0,
       style: style || 'Streetwear',
       shipDays: shipDays || '3-7',
-      photoPosition: photoPosition || 'center center'
+      photoPosition: photoPosition || 'center center',
+      photoFit: photoFit || 'cover'
     });
 
     const insertData = {
