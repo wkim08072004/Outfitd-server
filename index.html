@@ -2226,12 +2226,23 @@ var _stripePaymentElement = null;
 var _stripeClientSecret = null;
 
 function api(method, path, body) {
+  var token =
+    localStorage.getItem('token') ||
+    localStorage.getItem('authToken') ||
+    localStorage.getItem('jwt') ||
+    '';
+
+  var headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+
   var opts = {
     method: method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: headers,
     credentials: 'include'
   };
+
   if (body && method !== 'GET') opts.body = JSON.stringify(body);
+
   return fetch(API_URL + path, opts).then(function(r) {
     return r.json().then(function(data) {
       if (!r.ok) throw { status: r.status, message: data.error || 'Request failed' };
@@ -9231,6 +9242,8 @@ function handleLogin(){
     .then(function(data) {
       if(!data.user){ showErr('Login failed — please try again'); return; }
       _loginAttempts = 0; _loginLockedUntil = 0;
+      if (data && data.token) localStorage.setItem('token', data.token);
+if (data && data.refreshToken) localStorage.setItem('refreshToken', data.refreshToken);
       syncServerUser(data.user);
       // Capture state from saved address for geo-blocking
       if(S.savedAddress && S.savedAddress.state) S._userState = S.savedAddress.state;
@@ -9740,7 +9753,7 @@ function handleSaveBanner(){
   closeModal();renderCrew();
   showToast('✓ Banner updated!');
 }
-function handleEditProfile(){
+async function handleEditProfile(){
   if(!S.loggedIn){showToast('Not logged in');return;}
   var n=document.getElementById('m-ep-name');var h=document.getElementById('m-ep-handle');
   var b=document.getElementById('m-ep-bio');var a=document.getElementById('m-ep-avi');
@@ -9795,6 +9808,13 @@ function handleEditProfile(){
     if(!ap||!ap.value) S.user.aviPhoto=null;
   }
   saveSession(getSessionType());
+  
+await api('POST', '/auth/profile', {
+  handle: S.user.handle.replace('@',''),
+  display_name: S.user.name,
+  bio: S.user.bio,
+  avatar_url: S.user.aviPhoto || S.user.avi
+});
   // Sync changes back to the accounts store so they persist on next login
   try {
     var accts = getAccounts();
