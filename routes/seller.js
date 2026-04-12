@@ -32,57 +32,26 @@ function requireAuth(req, res, next) {
 // ═══════════════════════════════════════════════════════════════
 
 // GET /api/seller/listings/all — All active listings (PUBLIC)
-router.get('/seller/listings/all', async (req, res) => {
+router.get('/listings/all', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('seller_listings')
-      .select('*')
-      .eq('status', 'active')
-      .order('created_at', { ascending: false })
-      .limit(200);
+  const { data, error } = await supabase
+    .from('seller_listings')
+    .select('id, seller_id, title, description, price, images, category, sizes, status, created_at, updated_at')
+    .eq('status', 'active')
+    .order('created_at', { ascending: false })
+    .limit(50);
 
-    if (error) {
-      console.error('Listings fetch error:', error);
-      return res.json({ listings: [] });
-    }
+  if (error) {
+    console.error('Listings fetch error:', error);
+    return res.status(500).json({ error: 'Failed to fetch listings' });
+  }
 
-    const listings = (data || []).map(function(row) {
-      var meta = {};
-      try {
-        if (row.description && row.description.startsWith('{')) {
-          meta = JSON.parse(row.description);
-        }
-      } catch(e) {}
-
-      return {
-        id: 'sl_' + row.id,
-        localId: meta.localId || null,
-        name: row.title || 'Untitled',
-        brand: meta.brand || meta.sellerName || 'Seller',
-        sellerEmail: meta.sellerEmail || '',
-        sellerName: meta.sellerName || meta.brand || 'Seller',
-        sellerId: row.seller_id || ('dyn_' + (meta.sellerEmail || 'seller').replace(/[^a-z0-9]/gi, '_')),
-        type: 'marketplace',
-        category: row.category || 'Tops',
-        emoji: meta.emoji || '👗',
-        price: Number(row.price) || 0,
-        size: row.sizes || ['S','M','L'],
-        color: meta.color || 'Black',
-        condition: meta.condition || 'New',
-        returnWindow: meta.returnWindow || '14',
-        desc: meta.desc || (row.description && !row.description.startsWith('{') ? row.description : ''),
-        photos: row.images || [],
-        photo: (row.images && row.images[0]) || null,
-        stock: meta.stock !== undefined ? meta.stock : -1,
-        sold: meta.sold || 0,
-        style: meta.style || 'Streetwear',
-        shipDays: meta.shipDays || '3-7',
-        photoPosition: meta.photoPosition || 'center center',
-        photoFit: meta.photoFit || 'cover',
-        badge: 'NEW',
-        listedAt: new Date(row.created_at).getTime()
-      };
-    });
+  return res.json({ listings: data || [] });
+} catch (err) {
+  console.error('GET /listings/all error:', err);
+  return res.status(500).json({ error: 'Server error' });
+}
+        
 
     res.json({ listings });
   } catch (err) {
