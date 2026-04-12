@@ -9,14 +9,24 @@ Sentry.init({
 require('dotenv').config();
 const express = require('express');
 const app = express();
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "https://outfitd.co");
-  res.header("Access-Control-Allow-Credentials", "true");
-  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-res.header(
-  "Access-Control-Allow-Headers",
-  "Content-Type, Authorization, X-Requested-With"
-);
+const allowedOrigins = [
+  'https://outfitd.co',
+  'https://www.outfitd.co',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+];
+
+const corsOptions = {
+  origin: function(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+};
+
 
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
