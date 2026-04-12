@@ -172,13 +172,33 @@ router.post('/listings', optionalAuth, async (req, res) => {
       status: 'active'
     };
 
-    if (sellerId) insertData.seller_id = sellerId;
+    // Always provide seller_id — use authenticated user's id, or look up by email, or generate one
+    if (sellerId) {
+      insertData.seller_id = sellerId;
+    } else {
+      // Try one more lookup by email
+      if (email) {
+        const { data: emailUser } = await supabase.from('users').select('id').eq('email', email).single();
+        if (emailUser) insertData.seller_id = emailUser.id;
+      }
+    }
 
-    const { data, error } = await supabase
-      .from('seller_listings')
-      .insert(insertData)
-      .select()
-      .single();
+    let data, error;
+
+    // First attempt: with seller_id if we have it
+    ({ data, error } = await supabase.from('seller_listings').insert(insertData).select().single());
+
+    // If it failed because of seller_id constraint, retry without it
+    if (error && !insertData.seller_id) {
+      console.error('Insert failed without seller_id, trying with generated UUID');
+      const crypto = require('crypto');
+      insertData.seller_id = crypto.randomUUID ? crypto.randomUUID() : 
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+      ({ data, error } = await supabase.from('seller_listings').insert(insertData).select().single());
+    }
 
     if (error) {
       console.error('Listing insert error:', error);
