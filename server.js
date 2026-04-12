@@ -35,7 +35,7 @@ app.use(cors({
 }));
 
 // General rate limit
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
+app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 
 app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Too many login attempts. Please try again in 15 minutes.' } }));
 // Tighter limit on auth routes
@@ -44,7 +44,7 @@ app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
 // Parse cookies and JSON
 app.use(cookieParser());
 app.use('/api/webhooks', require('./routes/webhooks'));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use('/api/upload', require('./routes/upload'));
 // Guest session limits
 const { guestSessionMiddleware } = require("./middleware/guestSession");
