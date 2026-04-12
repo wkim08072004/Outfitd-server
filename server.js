@@ -23,7 +23,7 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
 res.header(
   "Access-Control-Allow-Headers",
-  "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+  req.headers["access-control-request-headers"] || "*"
 );
 
   if (req.method === "OPTIONS") {
@@ -187,3 +187,14 @@ Sentry.setupExpressErrorHandler(app);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.use((err, req, res, next) => {
+  console.error("🔥 SERVER ERROR:", err);
+
+  res.header("Access-Control-Allow-Origin", "https://outfitd.co");
+  res.header("Access-Control-Allow-Credentials", "true");
+
+  res.status(500).json({
+    error: "Internal Server Error",
+    message: err.message
+  });
+});
