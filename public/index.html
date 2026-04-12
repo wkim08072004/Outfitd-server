@@ -2623,65 +2623,56 @@ var ALL_PRODUCTS = PRODUCTS.concat(MARKETPLACE_PRODUCTS);
 
 // ── DYNAMIC SELLER LISTINGS — loads items published from seller dashboard ──
 function loadDynamicListings(){
-  var dynListings=[],dynSellers={};
-  try{dynListings=JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');}catch(e){}
-  try{dynSellers=JSON.parse(localStorage.getItem('outfitd_shared_sellers')||'{}');}catch(e){}
-  if(!dynListings.length) return;
-  var catZoneMap={Tops:'top',Bottoms:'bottom',Footwear:'shoes',Headwear:'head',Accessories:'acc',Outerwear:'top',Activewear:'top'};
+  api('GET','/api/seller/listings/all')
+    .then(function(data){
+      var dynListings = (data && data.listings) ? data.listings : [];
+      var catZoneMap = {Tops:'top',Bottoms:'bottom',Footwear:'shoes',Headwear:'head',Accessories:'acc',Outerwear:'top',Activewear:'top'};
 
-  Object.values(dynSellers).forEach(function(seller){
-    if(!SELLERS.find(function(s){return s.id===seller.id;})){
-      SELLERS.push({id:seller.id,name:seller.name,
-        handle:seller.handle||('@'+seller.name.replace(/\s+/g,'').toLowerCase()),
-        avatar:seller.avatar||'🏪',bio:seller.bio||'Independent seller on Outfitd',
-        location:seller.location||'',verified:true,sales:0,rating:'5.0',commissionRate:0.15});
-    }
-  });
+      dynListings.forEach(function(listing){
+        var nid = typeof listing.id === 'string' ? (parseFloat(listing.id)||listing.id) : listing.id;
 
-  dynListings.forEach(function(listing){
-    // Normalize ID to number for consistent strict === comparison
-    var nid = typeof listing.id === 'string' ? (parseFloat(listing.id)||listing.id) : listing.id;
-    // Skip duplicates using normalized ID
-    if(ALL_PRODUCTS.find(function(p){return p.id===nid||String(p.id)===String(nid);})) return;
-    var sellerRec=dynSellers[listing.sellerEmail]||null;
-    var sellerBrand=listing.brand||listing.sellerName||(sellerRec&&sellerRec.name)||'Seller';
-    var sellerId=sellerRec?sellerRec.id:('dyn_'+String(nid).slice(-6));
-    // Auto-register seller if not found
-    if(!SELLERS.find(function(s){return s.id===sellerId;})){
-      SELLERS.push({id:sellerId,name:sellerBrand,handle:'@'+sellerBrand.toLowerCase().replace(/\s/g,''),
-        avatar:(sellerRec&&sellerRec.avatar)||'🏪',bio:'',location:'',verified:true,sales:0,rating:'5.0',commissionRate:0.15});
-    }
-    var photoSrc = (listing.photos&&listing.photos[0]) || listing.photo || null;
-    var product={
-      id:nid,
-      brand:sellerBrand,
-      sellerId:sellerId,
-      type:'marketplace',
-      name:listing.name,
-      category:listing.category||'Tops',
-      emoji:listing.emoji||'👗',
-      _photo:photoSrc,
-      color:listing.color||'Black',
-      price:Number(listing.price)||0,
-      size:Array.isArray(listing.size)?listing.size:(listing.size?String(listing.size).split(',').map(function(s){return s.trim();}).filter(Boolean):['S','M','L']),
-      style:listing.style?[listing.style]:['Streetwear'],
-      zone:catZoneMap[listing.category]||'top',
-      badge:'NEW',
-      description:listing.desc||listing.description||'',
-      desc:listing.desc||listing.description||'',
-      photos:listing.photos||[],
-      condition:listing.condition||'New',
-      returnWindow:listing.returnWindow||'30 days',
-      shipDays:listing.shipDays||'3-7',
-      stock:listing.stock!==undefined?listing.stock:-1,
-      sold:listing.sold||0,
-      url:'#'
-    };
-    MARKETPLACE_PRODUCTS.push(product);
-    ALL_PRODUCTS.push(product);
-  });
+        if(ALL_PRODUCTS.find(function(p){return p.id===nid || String(p.id)===String(nid);})){
+          return;
+        }
+
+        var sellerBrand = listing.brand || listing.sellerName || 'Seller';
+
+        ALL_PRODUCTS.push({
+          id: nid,
+          brand: sellerBrand,
+          sellerName: listing.sellerName || sellerBrand,
+          sellerEmail: listing.sellerEmail || '',
+          type: 'marketplace',
+          name: listing.title || listing.name || 'Untitled Listing',
+          category: listing.category || 'Tops',
+          emoji: listing.emoji || '🛍️',
+          price: Number(listing.price || 0),
+          size: Array.isArray(listing.sizes) ? listing.sizes : (listing.size ? [listing.size] : []),
+          color: listing.color || '',
+          desc: listing.description || listing.desc || '',
+          style: Array.isArray(listing.style) ? listing.style : ['Marketplace'],
+          photos: listing.images || listing.photos || [],
+          photo: (listing.images && listing.images[0]) || (listing.photos && listing.photos[0]) || listing.photo || null,
+          condition: listing.condition || 'New',
+          returnWindow: listing.returnWindow || '30 days',
+          shipDays: listing.shipDays || '3-7',
+          badge: listing.badge || 'NEW',
+          listedAt: listing.createdAt || listing.listedAt || Date.now(),
+          zone: catZoneMap[listing.category] || 'top',
+          sellerId: listing.seller_id || listing.sellerId || null
+        });
+      });
+
+      MARKETPLACE_PRODUCTS = ALL_PRODUCTS.filter(function(p){
+        return p.type === 'marketplace';
+      });
+
+      if (typeof renderShop === 'function' && S && S.tab === 'shop') renderShop();
+    })
+    .catch(function(e){
+      console.log('Failed to load dynamic listings:', e);
+    });
 }
-loadDynamicListings();
 
 function getProductById(id){var sid=String(id);return ALL_PRODUCTS.find(function(p){return String(p.id)===sid;});}
 function getSellerById(id){return SELLERS.find(function(s){return s.id===id;});}
@@ -9012,20 +9003,19 @@ function submitSellerListing(sellerName){
     condition: 'New', returnWindow: '30 days', shipDays: '3-7',
     createdAt: Date.now()
   };
-  try{
-    var existing = JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');
-    existing.push(listing);
-    localStorage.setItem('outfitd_shared_listings', JSON.stringify(existing));
-  }catch(e){}
-  try{
-    var sellerRecs = JSON.parse(localStorage.getItem('outfitd_shared_sellers')||'{}');
-    sellerRecs[sellerEmail] = {
-      id: 'seller_'+sellerEmail.replace(/[^a-z0-9]/gi,'_'),
-      name: sellerName, handle: '@'+(sellerName||'seller').toLowerCase().replace(/\s/g,''),
-      avatar: S.user.avi||'🏪', bio: S.user.bio||'Independent seller on Outfitd', verified:true
-    };
-    localStorage.setItem('outfitd_shared_sellers', JSON.stringify(sellerRecs));
-  }catch(e){}
+  api('POST','/api/seller/listings/create', listing)
+  .then(function(){
+    _sellerListingPhoto = null;
+    loadDynamicListings();
+    closeModal();
+    showToast('✓ "'+name+'" is now live in the shop!');
+    if(S.tab==='shop') renderShop();
+  })
+  .catch(function(err){
+    console.error(err);
+    showToast('Failed to publish listing');
+  });
+return;
   _sellerListingPhoto = null;
   loadDynamicListings(); // inject immediately into live arrays
   closeModal();
@@ -9035,11 +9025,7 @@ function submitSellerListing(sellerName){
 
 function adminRemoveSellerListing(listingId){
   if(!S.loggedIn||!_isAdminHandle()) return;
-  try{
-    var listings = JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');
-    listings = listings.filter(function(l){ return String(l.id)!==String(listingId); });
-    localStorage.setItem('outfitd_shared_listings', JSON.stringify(listings));
-  }catch(e){}
+  
   // Remove from live arrays
   ALL_PRODUCTS = ALL_PRODUCTS.filter(function(p){ return String(p.id)!==String(listingId); });
   MARKETPLACE_PRODUCTS = MARKETPLACE_PRODUCTS.filter(function(p){ return String(p.id)!==String(listingId); });
@@ -11612,18 +11598,19 @@ function submitSellerTabListing(){
     photos:_sellerTabPhoto?[_sellerTabPhoto]:[],photo:_sellerTabPhoto||null,
     condition:'New',returnWindow:'30 days',shipDays:'3-7',badge:'NEW',listedAt:Date.now()
   };
-  try{
-    var ex=JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');
-    ex=ex.filter(function(l){return l.id!==listingId;});
-    ex.push(listing);
-    localStorage.setItem('outfitd_shared_listings',JSON.stringify(ex));
-  }catch(e){}
-  try{
-    var sr=JSON.parse(localStorage.getItem('outfitd_shared_sellers')||'{}');
-    var sid='dyn_'+sellerEmail.replace(/[^a-z0-9]/gi,'_');
-    sr[sellerEmail]={id:sid,name:sellerName,handle:'@'+sellerName.toLowerCase().replace(/\s/g,''),avatar:S.user.avi||'🏪',bio:S.user.bio||'Independent seller on Outfitd',verified:true};
-    localStorage.setItem('outfitd_shared_sellers',JSON.stringify(sr));
-  }catch(e){}
+  api('POST','/api/seller/listings/create', listing)
+  .then(function(){
+    _sellerTabPhoto = null;
+    loadDynamicListings();
+    showToast('✓ "'+name+'" is now live in the shop!');
+    renderSellerTab();
+    if(S.tab==='shop') renderShop();
+  })
+  .catch(function(err){
+    console.error(err);
+    showToast('Failed to publish listing');
+  });
+return;
   _sellerTabPhoto=null;
   loadDynamicListings();
   showToast('✓ "'+name+'" is now live in the shop!');
@@ -11651,11 +11638,8 @@ function adminRemoveProduct(pid){
   ALL_PRODUCTS = ALL_PRODUCTS.filter(function(p){ return String(p.id)!==sid; });
   MARKETPLACE_PRODUCTS = MARKETPLACE_PRODUCTS.filter(function(p){ return String(p.id)!==sid; });
   // Remove from localStorage shared listings if it was a seller listing
-  try{
-    var ls = JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');
-    ls = ls.filter(function(l){ return String(l.id)!==sid; });
-    localStorage.setItem('outfitd_shared_listings', JSON.stringify(ls));
-  }catch(e){}
+  api('DELETE','/api/seller/listings/'+encodeURIComponent(sid))
+  .catch(function(e){ console.log('Server delete failed:', e); });
   showToast('Item removed from shop');
   renderShop();
 }
@@ -12218,25 +12202,15 @@ var SD = {
 
   // ── Listing Bridge ──
   syncSellerInfo: function(){
-    var sellers={};
-    try{sellers=JSON.parse(localStorage.getItem('outfitd_shared_sellers')||'{}');}catch(e){}
-    var sid='dyn_'+(SD._state.seller.contactEmail||'seller').replace(/[^a-z0-9]/gi,'_');
-    sellers[SD._state.seller.contactEmail]={id:sid,name:SD._state.seller.name,handle:'@'+SD._state.seller.name.toLowerCase().replace(/\s+/g,''),avatar:'🏪',bio:'Independent seller on Outfitd',location:(SD._state.seller.address&&SD._state.seller.address.city?SD._state.seller.address.city+', '+SD._state.seller.address.state:''),verified:true,sales:0,rating:'5.0',email:SD._state.seller.contactEmail};
-    try{localStorage.setItem('outfitd_shared_sellers',JSON.stringify(sellers));}catch(e){}
-  },
+},
   syncListingToShared: function(listing){
-    var sid='dyn_'+(SD._state.seller.contactEmail||'seller').replace(/[^a-z0-9]/gi,'_');
-    var shared={id:'dyn_'+listing.id,brand:SD._state.seller.name,sellerEmail:SD._state.seller.contactEmail,sellerId:sid,type:'marketplace',name:listing.name,category:listing.category,emoji:SD.EMOJIS[listing.category]||'👗',price:listing.price,size:listing.size?listing.size.split(',').map(function(s){return s.trim();}).filter(Boolean):['S','M','L'],color:'Black',condition:listing.condition,returnWindow:listing.returnWindow,desc:listing.desc||'',photos:listing.photos||[],badge:'NEW',listedAt:Date.now(),stock:listing.stock!==undefined?listing.stock:-1,sold:listing.sold||0};
-    var all=[]; try{all=JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');}catch(e){}
-    all=all.filter(function(l){return l.id!==shared.id;}); all.push(shared);
-    try{localStorage.setItem('outfitd_shared_listings',JSON.stringify(all));}catch(e){}
-    SD.syncSellerInfo();
-  },
+  return api('POST','/api/seller/listings/create', listing)
+    .catch(function(e){ console.log('Failed to sync listing to server:', e); });
+},
   removeListingFromShared: function(listingId){
-    var all=[]; try{all=JSON.parse(localStorage.getItem('outfitd_shared_listings')||'[]');}catch(e){}
-    all=all.filter(function(l){return l.id!=='dyn_'+listingId&&l.id!==listingId;});
-    try{localStorage.setItem('outfitd_shared_listings',JSON.stringify(all));}catch(e){}
-  },
+  return api('DELETE','/api/seller/listings/'+encodeURIComponent(listingId))
+    .catch(function(e){ console.log('Failed to remove listing from server:', e); });
+},
 
   // ── Toast ──
   showToast: function(msg){
