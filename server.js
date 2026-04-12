@@ -8,14 +8,6 @@ Sentry.init({
 
 require('dotenv').config();
 const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const cookieParser = require('cookie-parser');
-
-const { Logtail } = require("@logtail/node");
-const { createClient } = require("@supabase/supabase-js");
-
 const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "https://outfitd.co");
@@ -32,7 +24,18 @@ res.header(
 
   next();
 });
+const helmet = require('helmet');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const cookieParser = require('cookie-parser');
+
+const { Logtail } = require("@logtail/node");
+const { createClient } = require("@supabase/supabase-js");
+
+app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 app.set('trust proxy', 1);
+app.use('/api/seller', require('./routes/seller')); // ← ADD THIS
+
 // Shared services
 const logtail = process.env.LOGTAIL_TOKEN ? new Logtail(process.env.LOGTAIL_TOKEN) : null;
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);

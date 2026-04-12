@@ -26,20 +26,13 @@ function requireAuth(req, res, next) {
   }
 }
 
-function requireAuth(req, res, next) {
-  const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
-  if (token) {
-    try { req.user = jwt.verify(token, process.env.JWT_SECRET); } catch (e) {}
-  }
-  next();
-}
 
 // ═══════════════════════════════════════════════════════════════
 // LISTING ROUTES
 // ═══════════════════════════════════════════════════════════════
 
 // GET /api/seller/listings/all — All active listings (PUBLIC)
-router.get('/listings/all', async (req, res) => {
+router.get('/seller/listings/all', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('seller_listings')
