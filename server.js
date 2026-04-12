@@ -26,13 +26,13 @@ res.header(
 });
 const helmet = require('helmet');
 const cors = require('cors');
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 
 const { Logtail } = require("@logtail/node");
 const { createClient } = require("@supabase/supabase-js");
 
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+// app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 app.set('trust proxy', 1);
 app.use('/api/seller', require('./routes/seller')); // ← ADD THIS
 
@@ -53,11 +53,11 @@ app.use(cors({
 }));
 
 // General rate limit
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+// app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 
-app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Too many login attempts. Please try again in 15 minutes.' } }));
+// app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Too many login attempts. Please try again later.' } }));lease try again in 15 minutes.' } }));
 // Tighter limit on auth routes
-app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
+// app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
 
 // Parse cookies and JSON
 app.use(cookieParser());
