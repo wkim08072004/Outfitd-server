@@ -17,6 +17,11 @@ const { Logtail } = require("@logtail/node");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+app.use(cors({
+  origin: "https://outfitd.co",
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  credentials: true
+}));
 app.set('trust proxy', 1);
 // Shared services
 const logtail = process.env.LOGTAIL_TOKEN ? new Logtail(process.env.LOGTAIL_TOKEN) : null;
