@@ -81,6 +81,8 @@ app.use("/api", guestSessionMiddleware);
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
+const sellerListingsRouter = require('./routes/sellerListings');
+app.use('/api/seller', sellerListingsRouter);
 app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/battles', require('./routes/battles'));
 app.use('/api/tournaments', require('./routes/tournaments'));
