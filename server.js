@@ -75,14 +75,13 @@ const { guestSessionMiddleware } = require("./middleware/guestSession");
 app.use("/api/payments", require("./routes/payments"));
 app.use("/api/paypal", require("./routes/paypal"));
 app.use("/api/seller-invite", require("./routes/seller-invite"));
+app.use('/api/seller', require('./routes/seller'));
 app.use("/api/stripe-connect", require("./routes/stripe-connect"));
 app.use("/api", guestSessionMiddleware);
 
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
-const sellerListingsRouter = require('./routes/sellerListings');
-app.use('/api/seller', sellerListingsRouter);
 app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/battles', require('./routes/battles'));
 app.use('/api/tournaments', require('./routes/tournaments'));
