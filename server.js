@@ -13,6 +13,7 @@ const app = express();
 const allowedOrigins = [
   'https://outfitd.co',
   'https://www.outfitd.co',
+    'https://outfitd.co',
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
@@ -52,9 +53,6 @@ app.locals.supabase = supabase;
 // Security headers
 app.use(helmet());
 
-// Only your frontend can call this API
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5500',
   credentials: true
 }));
 
