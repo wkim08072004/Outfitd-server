@@ -9,7 +9,7 @@ router.get('/listings/all', async (req, res) => {
       .select('*')
       .eq('status', 'active')
       .order('created_at', { ascending: false })
-      .limit(50);
+      ;
     if (error) { console.error('listings/all error:', error); return res.json({ listings: [], sellers: {} }); }
     const listings = (data || []).map(r => ({
       id: r.local_id || r.id, localId: r.local_id || '', name: r.name || r.title || '',
