@@ -40,7 +40,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 // app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 app.set('trust proxy', 1);
-app.use('/api/seller', require('./routes/seller')); // ← ADD THIS
+
 
 // Shared services
 const logtail = process.env.LOGTAIL_TOKEN ? new Logtail(process.env.LOGTAIL_TOKEN) : null;
