@@ -28,7 +28,7 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 };
 app.use(cors(corsOptions));
-app.options('/*', cors(corsOptions));
+
 
   
 const helmet = require('helmet');
