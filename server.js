@@ -8,6 +8,7 @@ Sentry.init({
 
 require('dotenv').config();
 const express = require('express');
+const cors = require('cors');
 const app = express();
 const allowedOrigins = [
   'https://outfitd.co',
@@ -26,17 +27,12 @@ const corsOptions = {
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 };
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
-  next();
-});
+  
 const helmet = require('helmet');
-const cors = require('cors');
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 
 const { Logtail } = require("@logtail/node");
