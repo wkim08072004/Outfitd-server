@@ -54,7 +54,6 @@ app.locals.supabase = supabase;
 app.use(helmet());
 
   credentials: true
-}));
 
 // General rate limit
 // app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
