@@ -1,6 +1,6 @@
-// === Sentry Error Tracking (must be first) ===
-const Sentry = require("@sentry/node");
-Sentry.init({
+// // === Sentry Error Tracking (must be first) ===
+// const Sentry = require("@sentry/node");
+// Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: process.env.NODE_ENV || "development",
   tracesSampleRate: 0.2,
@@ -190,8 +190,8 @@ app.get('/api/user/seller-status', async (req, res) => {
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/products', require('./routes/products'));
-// Sentry error handler (must be after all routes)
-Sentry.setupExpressErrorHandler(app);
+// // Sentry error handler (must be after all routes)
+// Sentry.setupExpressErrorHandler(app);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
