@@ -1,84 +1,157 @@
+// ═══════════════════════════════════════════════════════════════
+// seller.js — Seller application & listing routes
+// Drop into /Users/eshapatel/outfitd-server/routes/seller.js
+// Add to server.js: app.use('/api/seller', require('./routes/seller'));
+// ═══════════════════════════════════════════════════════════════
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
+const { createClient } = require('@supabase/supabase-js');
 
-router.get('/listings/all', async (req, res) => {
-  try {
-    const supabase = req.app.locals.supabase;
-    const { data, error } = await supabase
-      .from('seller_listings')
-      .select('*')
-      .eq('status', 'active')
-      .order('created_at', { ascending: false })
-      ;
-    if (error) { console.error('listings/all error:', error); return res.json({ listings: [], sellers: {} }); }
-    const listings = (data || []).map(r => ({
-      id: r.local_id || r.id, localId: r.local_id || '', name: r.name || r.title || '',
-      brand: r.brand || '', category: r.category || '', price: Number(r.price) || 0,
-      size: typeof r.size === 'string' ? JSON.parse(r.size) : (r.sizes || r.size || ['S','M','L']),
-      color: r.color || 'Black', emoji: r.emoji || '👕', desc: r.description || '',
-      style: r.style || 'Streetwear',
-      photos: typeof r.photos === 'string' ? JSON.parse(r.photos) : (r.images || r.photos || []),
-      sellerEmail: r.seller_email || '', condition: r.condition || 'New',
-      returnWindow: r.return_window || '30 days', shipDays: r.ship_days || '3-7',
-      stock: r.stock || 1, badge: 'NEW', type: 'marketplace', status: 'active',
-      listedAt: new Date(r.created_at).getTime()
-    }));
-    res.json({ listings, sellers: {} });
-  } catch (err) { console.error('listings/all catch:', err); res.json({ listings: [], sellers: {} }); }
-});
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
-router.get('/listings', async (req, res) => {
+function requireAuth(req, res, next) {
+  const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    const supabase = req.app.locals.supabase;
-    let q = supabase.from('seller_listings').select('*').eq('status', 'active');
-    if (req.query.email) q = q.eq('seller_email', req.query.email);
-    const { data, error } = await q;
-    if (error) throw error;
-    res.json({ listings: data || [] });
-  } catch (err) { console.error('listings catch:', err); res.json({ listings: [] }); }
-});
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
 
-router.post('/listings', async (req, res) => {
+function requireSeller(req, res, next) {
+  if (!req.user || req.user.role !== 'seller' && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Seller access required' });
+  }
+  next();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/seller/apply — Submit seller application
+// ═══════════════════════════════════════════════════════════════
+router.post('/apply', requireAuth, async (req, res) => {
   try {
-    const supabase = req.app.locals.supabase;
-    const b = req.body;
-    const photos = (b.photos || []).filter(p => !p || p.length < 200000);
-    const row = {
-      local_id: String(b.localId || b.id || Date.now()),
-      name: b.name || '', brand: b.brand || '', category: b.category || '',
-      price: Number(b.price) || 0, size: JSON.stringify(b.size || ['S','M','L']),
-      color: b.color || 'Black', emoji: b.emoji || '👕',
-      description: b.desc || '', style: b.style || 'Streetwear',
-      photos: JSON.stringify(photos), seller_email: b.sellerEmail || '',
-      condition: b.condition || 'New', return_window: b.returnWindow || '30',
-      ship_days: b.shipDays || '3-7', stock: b.stock !== undefined ? b.stock : 1,
-      status: 'active'
-    };
-    const { data: existing } = await supabase.from('seller_listings').select('id').eq('local_id', row.local_id).limit(1);
-    if (existing && existing.length) {
-      const { error } = await supabase.from('seller_listings').update(row).eq('id', existing[0].id);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('seller_listings').insert(row);
-      if (error) throw error;
+    const userId = req.user.id;
+    const { brand, ig, email, categories, currentSales, volume, bio,
+            agreementVersion, agreementAcceptedAt, agreementUserAgent } = req.body;
+
+    if (!brand || !email) {
+      return res.status(400).json({ error: 'Brand name and email required' });
     }
-    console.log('[Seller] Saved:', row.name);
-    res.json({ success: true, id: row.local_id });
-  } catch (err) { console.error('POST listings:', err); res.status(500).json({ error: err.message }); }
+
+    const { data, error } = await supabase
+      .from('seller_applications')
+      .insert({
+        user_id: userId,
+        brand_name: brand,
+        brand_type: 'marketplace',
+        website: null,
+        instagram: ig || null,
+        description: bio || null,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ application_id: data.id, status: 'pending' });
+  } catch (err) {
+    console.error('Seller apply error:', err);
+    return res.status(500).json({ error: 'Application submission failed' });
+  }
 });
 
-router.delete('/listings/:id', async (req, res) => {
+// ═══════════════════════════════════════════════════════════════
+// POST /api/seller/partner-apply — Submit partner/affiliate application
+// ═══════════════════════════════════════════════════════════════
+router.post('/partner-apply', requireAuth, async (req, res) => {
   try {
-    const supabase = req.app.locals.supabase;
-    await supabase.from('seller_listings').update({ status: 'deleted' }).eq('local_id', req.params.id);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const userId = req.user.id;
+    const { brand, url, email, commission } = req.body;
+
+    if (!brand || !email) {
+      return res.status(400).json({ error: 'Brand name and email required' });
+    }
+
+    const { data, error } = await supabase
+      .from('seller_applications')
+      .insert({
+        user_id: userId,
+        brand_name: brand,
+        brand_type: 'partner',
+        website: url || null,
+        description: `Commission: ${commission || 'standard'}`,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ application_id: data.id, status: 'pending' });
+  } catch (err) {
+    console.error('Partner apply error:', err);
+    return res.status(500).json({ error: 'Application submission failed' });
+  }
 });
 
-router.post('/profile', (req, res) => { res.json({ success: true }); });
-router.post('/apply', (req, res) => { res.json({ success: true }); });
-router.get('/applications', (req, res) => { res.json({ applications: [] }); });
-router.post('/approve', (req, res) => { res.json({ success: true }); });
-router.post('/partner-apply', (req, res) => { res.json({ success: true }); });
+// ═══════════════════════════════════════════════════════════════
+// POST /api/seller/listings — Create a product listing (seller only)
+// ═══════════════════════════════════════════════════════════════
+router.post('/listings', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { name, description, price, category, sizes, colors, style_tags, is_final_sale, inventory } = req.body;
+
+    if (!name || !price || price <= 0) {
+      return res.status(400).json({ error: 'Name and valid price required' });
+    }
+
+    const { data, error } = await supabase
+      .from('products')
+      .insert({
+        seller_id: req.user.id,
+        name,
+        description: description || '',
+        price: Math.round(price * 100) / 100,
+        category: category || 'general',
+        sizes: sizes || [],
+        colors: colors || [],
+        style_tags: style_tags || [],
+        listing_status: 'pending', // Requires admin approval
+        is_final_sale: is_final_sale || false,
+        inventory: inventory || 0,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.json({ product: data });
+  } catch (err) {
+    console.error('Listing create error:', err);
+    return res.status(500).json({ error: 'Failed to create listing' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GET /api/seller/listings — Get seller's own listings
+// ═══════════════════════════════════════════════════════════════
+router.get('/listings', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .eq('seller_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    return res.json({ listings: data || [] });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to fetch listings' });
+  }
+});
 
 module.exports = router;
