@@ -316,9 +316,38 @@ router.get('/listings/:id/photos', async (req, res) => {
     }
 
     if (!row) return res.json({ photos: [] });
-    const photos = (Array.isArray(row.photos) && row.photos.length) ? row.photos
-                 : (Array.isArray(row.images) && row.images.length) ? row.images
-                 : [];
+
+    // Extract photos tolerantly — the column might store:
+    //   • a JSON array:   ["data:image/...", "..."]
+    //   • a JSON-encoded string: '["data:image/..."]'
+    //   • a single string: "data:image/..."
+    //   • null / undefined
+    function extractPhotos(field) {
+      if (!field) return [];
+      if (Array.isArray(field)) return field.filter(Boolean);
+      if (typeof field === 'string') {
+        const s = field.trim();
+        if (!s) return [];
+        if (s.charAt(0) === '[') {
+          try {
+            const parsed = JSON.parse(s);
+            if (Array.isArray(parsed)) return parsed.filter(Boolean);
+          } catch (_) { /* fall through */ }
+        }
+        return [s];
+      }
+      if (typeof field === 'object') {
+        // jsonb could come back as an object of numeric keys; coerce to array
+        const vals = Object.values(field).filter(Boolean);
+        if (vals.length) return vals;
+      }
+      return [];
+    }
+
+    const fromPhotos = extractPhotos(row.photos);
+    const fromImages = extractPhotos(row.images);
+    const photos = fromPhotos.length ? fromPhotos : fromImages;
+
     // Cache photos aggressively — they're large and rarely change. Browsers
     // will serve from cache on refresh, avoiding re-fetching megabytes of
     // base64 data every page load.
