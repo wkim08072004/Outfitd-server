@@ -230,12 +230,28 @@ router.post('/listings', requireAuth, requireSeller, async (req, res) => {
 // GET /api/seller/listings/all — Public shop feed
 // Returns every active listing plus a sellers-by-email lookup. This is
 // what loadDynamicListings() on the shop page calls.
+//
+// IMPORTANT: we deliberately exclude the `photos` and `images` columns —
+// they are base64-encoded data URLs averaging ~400KB per row, with some
+// rows over 6MB. Selecting them across all rows produces a multi-megabyte
+// response that times out Render's 15s gateway (502). The shop grid falls
+// back to emoji/color placeholders when `photos` is absent. A separate
+// endpoint below fetches full photos for a single listing on demand.
 // ═══════════════════════════════════════════════════════════════
+const LIST_COLUMNS = [
+  'id', 'seller_id', 'seller_email', 'local_id',
+  'name', 'title', 'brand', 'category',
+  'price', 'color', 'emoji', 'style',
+  'size', 'sizes', 'condition', 'return_window', 'ship_days',
+  'stock', 'description', 'status',
+  'created_at', 'updated_at',
+].join(', ');
+
 router.get('/listings/all', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('seller_listings')
-      .select('*')
+      .select(LIST_COLUMNS)
       .neq('status', 'deleted')
       .order('created_at', { ascending: false });
 
@@ -263,6 +279,50 @@ router.get('/listings/all', async (req, res) => {
   } catch (err) {
     console.error('[listings/all] error:', err);
     return res.status(500).json({ error: 'Failed to fetch listings' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GET /api/seller/listings/:id/photos — Fetch photos for one listing
+// Lazy photo loader. The shop feed omits photos for payload reasons;
+// when a user opens a product, the client can call this to hydrate.
+// ═══════════════════════════════════════════════════════════════
+router.get('/listings/:id/photos', async (req, res) => {
+  try {
+    const rawId = String(req.params.id || '').trim();
+    if (!rawId) return res.status(400).json({ error: 'id required' });
+
+    const candidates = new Set([rawId]);
+    if (rawId.startsWith('dyn_')) candidates.add(rawId.slice(4));
+    else candidates.add('dyn_' + rawId);
+    const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId);
+
+    let row = null;
+    {
+      const { data } = await supabase
+        .from('seller_listings')
+        .select('id, photos, images')
+        .in('local_id', Array.from(candidates))
+        .limit(1);
+      if (data && data.length) row = data[0];
+    }
+    if (!row && looksLikeUuid) {
+      const { data } = await supabase
+        .from('seller_listings')
+        .select('id, photos, images')
+        .eq('id', rawId)
+        .limit(1);
+      if (data && data.length) row = data[0];
+    }
+
+    if (!row) return res.json({ photos: [] });
+    const photos = (Array.isArray(row.photos) && row.photos.length) ? row.photos
+                 : (Array.isArray(row.images) && row.images.length) ? row.images
+                 : [];
+    return res.json({ photos });
+  } catch (err) {
+    console.error('[listings photos] error:', err);
+    return res.status(500).json({ error: 'Failed to fetch photos' });
   }
 });
 
