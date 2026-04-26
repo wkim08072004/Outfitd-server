@@ -37,7 +37,23 @@ router.get('/', requireAuth, async (req, res) => {
       .eq('buyer_id', userId)
       .order('created_at', { ascending: false })
       .limit(50);
-    if (error) throw error;
+
+    // Graceful fallback: missing table or unknown column should not whitescreen
+    // the order-history UI — return an empty list and let the frontend show
+    // its "no orders yet" state. Surfaces the cause in server logs for ops.
+    if (error) {
+      const msg = (error.message || '').toLowerCase();
+      const code = error.code || '';
+      const benign = msg.includes('does not exist')
+        || msg.includes('relation') && msg.includes('does not exist')
+        || code === '42P01'   // undefined_table
+        || code === '42703';  // undefined_column
+      if (benign) {
+        console.warn('GET /api/orders — schema not ready, returning []:', error.message);
+        return res.json({ orders: [] });
+      }
+      throw error;
+    }
 
     const { data: user } = await supabase
       .from('users').select('handle').eq('id', userId).single();
