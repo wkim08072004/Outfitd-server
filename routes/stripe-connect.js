@@ -82,17 +82,31 @@ async function loadStripeAccountId(userId) {
 // for the same underlying account.
 // ═══════════════════════════════════════════════════════════════
 router.post('/onboard', requireAuth, async (req, res) => {
+  const userId = userIdOf(req);
+  // Step 1: load existing record so we don't create duplicate Connect accounts.
+  // Schema-missing case is handled gracefully — the Stripe path still runs.
+  let userRecord = null;
   try {
-    const userId = userIdOf(req);
-    const userRecord = await loadStripeAccountId(userId);
-    const userEmail = (userRecord && userRecord.email)
-      || (req.user && req.user.email)
-      || (req.body && req.body.email)
-      || '';
-    if (!userEmail) return res.status(400).json({ error: 'No email on account' });
+    userRecord = await loadStripeAccountId(userId);
+  } catch (loadErr) {
+    console.warn('[stripe-connect] /onboard load step warning:', loadErr.message);
+  }
 
-    let accountId = userRecord && userRecord.stripe_account_id;
-    if (!accountId) {
+  const userEmail = (userRecord && userRecord.email)
+    || (req.user && req.user.email)
+    || (req.body && req.body.email)
+    || '';
+  if (!userEmail) {
+    return res.status(400).json({
+      error: 'no_email',
+      message: 'No email on account — set a contact email in Settings before connecting Stripe.',
+    });
+  }
+
+  // Step 2: create or reuse Stripe Connect account
+  let accountId = userRecord && userRecord.stripe_account_id;
+  if (!accountId) {
+    try {
       const account = await stripe.accounts.create({
         type: 'express',
         email: userEmail,
@@ -104,19 +118,56 @@ router.post('/onboard', requireAuth, async (req, res) => {
         metadata: { outfitd_user_id: String(userId || '') },
       });
       accountId = account.id;
-      await persistStripeAccountId(userId, accountId);
+    } catch (stripeErr) {
+      console.error('[stripe-connect] /onboard accounts.create failed:',
+        stripeErr.code || '(no code)', stripeErr.type || '', stripeErr.message);
+      // Detect the most common platform-misconfig case so the seller
+      // sees a useful message instead of a generic 500.
+      const m = (stripeErr.message || '').toLowerCase();
+      if (m.includes('signed up for connect') || m.includes('platform') && m.includes('connect')) {
+        return res.status(503).json({
+          error: 'connect_not_activated',
+          message: 'Stripe Connect is not yet activated on this Outfitd account. Visit https://dashboard.stripe.com/connect/onboarding to enable Connect, then retry.',
+          stripe_message: stripeErr.message,
+        });
+      }
+      return res.status(502).json({
+        error: 'stripe_account_create_failed',
+        message: 'Could not create your Stripe Connect account: ' + stripeErr.message,
+        stripe_code: stripeErr.code || null,
+        stripe_type: stripeErr.type || null,
+      });
     }
 
+    // Persist (best-effort — column may not exist yet)
+    const persistResult = await persistStripeAccountId(userId, accountId);
+    if (!persistResult.ok && persistResult.reason === 'schema-missing') {
+      // Don't block onboarding; just log loudly. The seller can still
+      // complete Stripe onboarding via the link we return below — they
+      // just won't have it persisted across sessions until the column
+      // is added.
+      console.warn('[stripe-connect] proceeding without persistence —',
+        'run: ALTER TABLE users ADD COLUMN stripe_account_id TEXT;');
+    }
+  }
+
+  // Step 3: issue onboarding link
+  try {
     const accountLink = await stripe.accountLinks.create({
       account: accountId,
       refresh_url: 'https://outfitd.co/?stripe_connect_refresh=1',
       return_url: 'https://outfitd.co/?stripe_connect_return=1',
       type: 'account_onboarding',
     });
-    res.json({ url: accountLink.url, account_id: accountId });
-  } catch (err) {
-    console.error('Stripe Connect onboard error:', err.message);
-    res.status(500).json({ error: err.message });
+    return res.json({ url: accountLink.url, account_id: accountId });
+  } catch (linkErr) {
+    console.error('[stripe-connect] /onboard accountLinks.create failed:',
+      linkErr.code || '', linkErr.message);
+    return res.status(502).json({
+      error: 'stripe_account_link_failed',
+      message: 'Created your account but could not generate the onboarding link: ' + linkErr.message,
+      account_id: accountId,
+    });
   }
 });
 
