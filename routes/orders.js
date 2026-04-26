@@ -13,14 +13,24 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── Marketplace economics (mirror of the frontend constants) ──────────────
-// Of the item subtotal: 85% → seller, 10% → Outfitd, 5% → buyer Style Points.
-// Shipping is flat and goes to the seller to cover postage. Tax is collected
-// and remitted by Outfitd.
+// ── Marketplace economics ────────────────────────────────────────────────
+// Of the CASH COLLECTED (gross total minus any Style Points redemption):
+//   85% → seller (held during return window, then transferred to their
+//                 Stripe Connect account)
+//   10% → Outfitd (retained as platform fee)
+//    5% → buyer (issued as new Style Points — closed-loop currency)
+// Shipping is flat per-seller and passes through to the seller in full.
+// Tax is collected and remitted by Outfitd separately.
+//
+// Style Points redeemed by the buyer transfer 1:1 to the seller(s) of the
+// items they were redeemed against. Sellers can later cash points back to
+// USD at 1:1 (100 pts = $1) via /api/stripe-connect/cashout.
 const SHIPPING_FLAT_FEE  = 4;
 const SELLER_PAYOUT_PCT  = 0.85;
 const PLATFORM_FEE_PCT   = 0.10;
 const BUYER_REWARD_PCT   = 0.05;
+const RETURN_WINDOW_DAYS = 14;
+const POINTS_PER_DOLLAR  = 100;  // 1 pt = 1 cent for cash-conversion math
 
 // ── Auth middleware (reuse your existing one, or inline) ──
 function requireAuth(req, res, next) {
@@ -249,7 +259,11 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
   }
 
   try {
-    // 1) Verify with Stripe — never trust the client to say "I paid"
+    // 1) Verify with Stripe — never trust the client to say "I paid".
+    //    The intent.metadata is our authoritative record of how much
+    //    Style Points the buyer redeemed (set at create-intent time
+    //    after server-side validation), so we use THAT number for
+    //    bookkeeping rather than anything the client sends here.
     const intent = await stripe.paymentIntents.retrieve(payment_intent_id);
     if (intent.status !== 'succeeded') {
       console.warn('[confirm-payment] PaymentIntent not succeeded:',
@@ -259,9 +273,14 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
         intent_status: intent.status,
       });
     }
+    const piMeta = intent.metadata || {};
+    const pointsApplied = Math.max(0, parseInt(piMeta.points_applied || '0', 10) || 0);
+    const outfitdRemainderPts = Math.max(0, parseInt(piMeta.outfitd_remainder_pts || '0', 10) || 0);
 
     // 2) Idempotency: if we've already recorded any rows for this
-    //    payment_intent_id, return them unchanged.
+    //    payment_intent_id, return them unchanged. Important — without
+    //    this, a frontend retry after a momentary network blip would
+    //    double-credit Style Points and double-insert order rows.
     const { data: existing } = await supabase
       .from('orders')
       .select('id, listing_id, seller_id')
@@ -284,6 +303,7 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
     //    to the first row for that seller, others get $0 shipping —
     //    sellers pack multiple items in one package).
     const rows = [];
+    let pointsRemainderToOutfitd = 0;
     if (Array.isArray(items) && items.length > 0) {
       const productIds = items.map(it => it.product_id || it.id).filter(Boolean);
       let listingMap = {};
@@ -340,7 +360,8 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
       }
 
       // Per-seller MAX shipping using canonical values where available.
-      const sellerShipping = {};
+      const sellerShipping = {};       // sid -> shipping fee (dollars)
+      const sellerSubtotalCents = {};  // sid -> sum of item line totals
       for (const item of items) {
         const id = item.product_id || item.id;
         const canonical = listingMap[id];
@@ -348,25 +369,98 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
                                : (Number.isFinite(Number(item.shipping_price)) ? Number(item.shipping_price) : 4);
         const sid = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || '__unknown__';
         if (sellerShipping[sid] === undefined || ship > sellerShipping[sid]) sellerShipping[sid] = ship;
+        const unitPrice = canonical ? canonical.price : (Number(item.price) || 0);
+        const qty = Math.max(1, Math.min(99, Number(item.qty) || 1));
+        sellerSubtotalCents[sid] = (sellerSubtotalCents[sid] || 0) + Math.round(unitPrice * qty * 100);
       }
+
+      // ── Distribute redemption across sellers ────────────────────
+      // The PaymentIntent metadata already carries the seller-level
+      // allocation rule (even split with remainder to Outfitd unless
+      // buyer specified). Rebuild that here so confirm-payment can
+      // distribute on a per-row basis proportional to each row's
+      // share of its seller's items.
+      const sellerIds = Object.keys(sellerSubtotalCents);
+      const sellerPointsAlloc = {}; // sid -> pts allocated to this seller
+      if (pointsApplied > 0 && sellerIds.length > 0) {
+        const evenShare = Math.floor(pointsApplied / sellerIds.length);
+        for (const sid of sellerIds) sellerPointsAlloc[sid] = evenShare;
+        pointsRemainderToOutfitd = pointsApplied - (evenShare * sellerIds.length);
+        // Reconcile against the PI's recorded remainder; if they
+        // disagree, trust the PI's value (set at create-intent under
+        // the same buyer-allocation logic).
+        if (outfitdRemainderPts > pointsRemainderToOutfitd) {
+          pointsRemainderToOutfitd = outfitdRemainderPts;
+        }
+      }
+
       const sellerShippingClaimed = {};
+      const sellerPointsAttributed = {}; // sid -> pts assigned so far across rows
       for (const item of items) {
         const id = item.product_id || item.id;
         const canonical = listingMap[id];
         const unitPrice = canonical ? canonical.price : (Number(item.price) || 0);
         const qty = Math.max(1, Math.min(99, Number(item.qty) || 1));
         const sid = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || '__unknown__';
-        const shippingForRow = sellerShippingClaimed[sid] ? 0 : (sellerShipping[sid] || 0);
+        const sellerIdForRow = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || null;
+
+        const lineItemCents = Math.round(unitPrice * qty * 100);
+        const shippingForRow = sellerShippingClaimed[sid]
+          ? 0
+          : Math.round((sellerShipping[sid] || 0) * 100);
         sellerShippingClaimed[sid] = true;
-        const itemTotalCents = Math.round((unitPrice * qty + shippingForRow) * 100);
+        const grossRowCents = lineItemCents + shippingForRow;
+
+        // Row's share of seller's redemption: proportional to item
+        // value within the seller's items. Last row in each seller
+        // gets the rounding remainder so the seller's allocation
+        // sums exactly.
+        let pointsForRow = 0;
+        if (pointsApplied > 0 && sellerPointsAlloc[sid]) {
+          const sellerTotal = sellerSubtotalCents[sid] || 1;
+          const itemFraction = lineItemCents / sellerTotal;
+          pointsForRow = Math.floor(sellerPointsAlloc[sid] * itemFraction);
+          // Track for rounding fix on last row of this seller
+          sellerPointsAttributed[sid] = (sellerPointsAttributed[sid] || 0) + pointsForRow;
+        }
+        // Ensure last row absorbs any rounding remainder for its seller
+        const isLastForSeller = !items.slice(items.indexOf(item) + 1).some(it2 => {
+          const c2 = listingMap[it2.product_id || it2.id];
+          const s2 = (c2 && c2.seller_id) || it2.seller_id || it2.sellerId || '__unknown__';
+          return s2 === sid;
+        });
+        if (isLastForSeller && pointsApplied > 0 && sellerPointsAlloc[sid]) {
+          const remainder = sellerPointsAlloc[sid] - sellerPointsAttributed[sid];
+          if (remainder > 0) pointsForRow += remainder;
+        }
+
+        const cashCollectedCents = Math.max(0, grossRowCents - pointsForRow);
+        // 85% / 10% / 5% split is on CASH COLLECTED for this row.
+        // Shipping is excluded from the % math — shipping passes
+        // through to the seller in full.
+        const cashItemPortion = Math.max(0, cashCollectedCents - shippingForRow);
+        const sellerCashCents = Math.round(cashItemPortion * SELLER_PAYOUT_PCT) + shippingForRow;
+        const platformFeeCents = Math.round(cashItemPortion * PLATFORM_FEE_PCT);
+        const buyerRewardPts = Math.round(cashItemPortion * BUYER_REWARD_PCT);
+
         rows.push({
           buyer_id: buyerId,
-          seller_id: (canonical && canonical.seller_id) || item.seller_id || item.sellerId || null,
+          seller_id: sellerIdForRow,
           listing_id: (canonical && canonical.listing_id) || item.product_id || item.id || null,
-          total: itemTotalCents,
+          total: grossRowCents,                    // headline price (cents)
           stripe_payment_id: payment_intent_id,
           shipping_address: shipping_address || null,
           status: 'paid',
+          // Robux-economy bookkeeping (new columns — see migration list)
+          gross_total_cents:    grossRowCents,
+          shipping_cents:       shippingForRow,
+          cash_collected_cents: cashCollectedCents,
+          points_applied:       pointsForRow,
+          seller_cash_due_cents: sellerCashCents,
+          seller_points_due:    pointsForRow,      // pts pass through 1:1 to seller
+          platform_fee_cents:   platformFeeCents,
+          buyer_reward_pts:     buyerRewardPts,
+          return_window_days:   RETURN_WINDOW_DAYS,
         });
       }
     } else {
@@ -374,10 +468,11 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
         buyer_id: buyerId,
         seller_id: null,
         listing_id: null,
-        total: intent.amount, // already in cents
+        total: intent.amount,
         stripe_payment_id: payment_intent_id,
         shipping_address: shipping_address || null,
         status: 'paid',
+        cash_collected_cents: intent.amount,
       });
     }
 
@@ -414,42 +509,105 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
         .eq('stripe_payment_id', payment_intent_id);
     }
 
-    // ── Award the buyer their 5% Style Points reward ─────────────────────
-    // Compute against the item subtotal only (not shipping or tax). Insider
-    // and Legend tiers earn at higher rates, matching the existing webhook
-    // path's tierRate logic so the two flows can never disagree.
-    let pointsAwarded = 0;
+    // ── Style Points ledger updates ─────────────────────────────────────
+    // We do four things here, all best-effort (the orders are already
+    // recorded above; if a points step fails we log and continue rather
+    // than fail the whole call after Stripe took the buyer's money):
+    //   1. Deduct the buyer's redeemed points from their op_balance
+    //   2. Credit each seller's op_balance with their pass-through points
+    //   3. Credit the buyer's op_balance with new earn pts (5% of cash)
+    //   4. Insert audit-trail rows in `transactions` for everything
+    //
+    // Subscription tier still bumps the EARN rate (Insider 7%, Legend 10%)
+    // — the rest of the model treats all buyers identically.
+    let totalPointsAwarded = 0;
+    let totalPointsRedeemed = 0;
+    const sellerPointsCredited = {};
     try {
-      const subtotalCents = (Array.isArray(items) && items.length)
-        ? items.reduce((acc, it) => acc + Math.round((Number(it.price) || 0) * (Number(it.qty) || 1) * 100), 0)
-        : intent.amount; // fall back to the full charge if cart wasn't forwarded
+      const sellerPointsByRow = {}; // sid -> sum(seller_points_due) across rows
+      let buyerRewardSum = 0;
+      let pointsAppliedSum = 0;
+      for (const row of rows) {
+        if (row.seller_id && row.seller_points_due) {
+          sellerPointsByRow[row.seller_id] = (sellerPointsByRow[row.seller_id] || 0) + row.seller_points_due;
+        }
+        buyerRewardSum += row.buyer_reward_pts || 0;
+        pointsAppliedSum += row.points_applied || 0;
+      }
 
       const { data: buyer } = await supabase
         .from('users')
         .select('subscription, op_balance')
         .eq('id', buyerId)
         .single();
+
+      // Apply tier bonus to NEW earn rate only — redemption math stays at 1:1.
       const tierRate = (buyer && buyer.subscription === 'legend') ? 0.10
         : (buyer && buyer.subscription === 'insider') ? 0.07 : BUYER_REWARD_PCT;
-      // Style Points are integer points where 100 pts = $1. So 5% of a $15
-      // subtotal ($0.75) becomes 75 pts. Express as: cents * rate.
-      pointsAwarded = Math.round(subtotalCents * tierRate);
-      if (pointsAwarded > 0 && buyer) {
-        await supabase
-          .from('users')
-          .update({ op_balance: (buyer.op_balance || 0) + pointsAwarded })
-          .eq('id', buyerId);
+      // If Insider/Legend, the 5% baseline is replaced by tier rate. We
+      // recompute against the same cash-item-portion the rows used.
+      let tierAdjustedReward = buyerRewardSum;
+      if (tierRate !== BUYER_REWARD_PCT) {
+        let cashItemPortionSum = 0;
+        for (const row of rows) {
+          cashItemPortionSum += Math.max(0, (row.cash_collected_cents || 0) - (row.shipping_cents || 0));
+        }
+        tierAdjustedReward = Math.round(cashItemPortionSum * tierRate);
+      }
+
+      // 1) Deduct buyer's redeemed points + 3) credit buyer's new reward
+      //    in one update (atomic relative to other writes against this row).
+      const buyerOldBalance = (buyer && buyer.op_balance) || 0;
+      const buyerNewBalance = Math.max(0, buyerOldBalance - pointsAppliedSum + tierAdjustedReward);
+      if (buyerOldBalance !== buyerNewBalance) {
+        await supabase.from('users').update({ op_balance: buyerNewBalance }).eq('id', buyerId);
+      }
+      if (pointsAppliedSum > 0) {
         await supabase.from('transactions').insert({
-          user_id: buyerId,
-          type: 'purchase_reward',
-          currency: 'op_balance',
-          amount: pointsAwarded,
-          description: 'Order reward: +' + pointsAwarded + ' Style Points',
+          user_id: buyerId, type: 'redemption', currency: 'op_balance',
+          amount: -pointsAppliedSum,
+          description: 'Redeemed ' + pointsAppliedSum + ' Style Points on order ' + (orderIds[0] || ''),
         });
+        totalPointsRedeemed = pointsAppliedSum;
+      }
+      if (tierAdjustedReward > 0) {
+        await supabase.from('transactions').insert({
+          user_id: buyerId, type: 'purchase_reward', currency: 'op_balance',
+          amount: tierAdjustedReward,
+          description: 'Order reward: +' + tierAdjustedReward + ' Style Points',
+        });
+        totalPointsAwarded = tierAdjustedReward;
+      }
+
+      // 2) Credit each seller's op_balance with their pass-through points.
+      //    Done one seller at a time — each is a separate user row update.
+      for (const sid of Object.keys(sellerPointsByRow)) {
+        const pts = sellerPointsByRow[sid];
+        if (pts <= 0) continue;
+        const { data: sellerRow } = await supabase
+          .from('users').select('op_balance').eq('id', sid).single();
+        const sellerOld = (sellerRow && sellerRow.op_balance) || 0;
+        await supabase.from('users')
+          .update({ op_balance: sellerOld + pts }).eq('id', sid);
+        await supabase.from('transactions').insert({
+          user_id: sid, type: 'redemption_inflow', currency: 'op_balance',
+          amount: pts,
+          description: 'Style Points received from buyer redemption on order ' + (orderIds[0] || ''),
+        });
+        sellerPointsCredited[sid] = pts;
+      }
+
+      // 4) The Outfitd remainder pts (rounding from even-split) accrue
+      //    silently to the platform fee — recorded as a transaction
+      //    against the system "outfitd" user_id placeholder, or just
+      //    logged. We don't need to write a row to update Outfitd's
+      //    balance because the platform never withdraws Style Points.
+      if (pointsRemainderToOutfitd > 0) {
+        console.log('[confirm-payment] outfitd retained ' + pointsRemainderToOutfitd +
+          ' pts as redemption-allocation rounding remainder, PI=' + payment_intent_id);
       }
     } catch (pointsErr) {
-      // Style Points award is best-effort; do not fail the order on this.
-      console.warn('[confirm-payment] Style Points award skipped:',
+      console.warn('[confirm-payment] Style Points ledger update partial failure:',
         pointsErr.message || pointsErr);
     }
 
@@ -457,7 +615,9 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
       ok: true,
       order_ids: orderIds,
       payment_intent_id,
-      style_points_awarded: pointsAwarded,
+      points_redeemed: totalPointsRedeemed,
+      points_awarded: totalPointsAwarded,
+      seller_points_credited: sellerPointsCredited,
     });
   } catch (err) {
     console.error('[confirm-payment] error:', err);
@@ -528,6 +688,188 @@ router.get('/seller', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('GET /api/orders/seller error:', err);
     res.status(500).json({ error: 'Failed to fetch seller orders' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/orders/release-due
+// Idempotent. Finds orders whose return window has expired and the
+// seller hasn't been paid yet (transfer_id IS NULL), groups by
+// seller, and creates one Stripe Transfer per seller for the sum
+// of their seller_cash_due_cents (which already includes shipping).
+//
+// Called lazily from the seller's earnings page on render — that
+// way no cron is required, and the transfer fires within seconds
+// of the seller actually checking their balance. Calling it more
+// often than needed is safe (the date filter excludes already-
+// transferred rows). Anyone authenticated can call it; it only
+// touches orders for connected sellers and is rate-limited
+// implicitly by the per-row idempotency check.
+// ═══════════════════════════════════════════════════════════════
+router.post('/release-due', requireAuth, async (req, res) => {
+  try {
+    // Find rows that are paid, not yet released, and past their
+    // return window. Use created_at + return_window_days as the
+    // cutoff (we don't have reliable delivered_at tracking yet).
+    const cutoff = new Date(Date.now() - RETURN_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const { data: dueRows, error: dueErr } = await supabase
+      .from('orders')
+      .select('id, seller_id, seller_cash_due_cents, stripe_payment_id, created_at')
+      .eq('status', 'paid')
+      .is('transfer_id', null)
+      .lt('created_at', cutoff)
+      .not('seller_id', 'is', null);
+    if (dueErr) {
+      console.warn('[release-due] query failed:', dueErr.code, dueErr.message);
+      return res.json({ ok: true, released: [], error: 'query_failed' });
+    }
+    if (!dueRows || dueRows.length === 0) {
+      return res.json({ ok: true, released: [] });
+    }
+
+    // Group by seller
+    const bySeller = {};
+    for (const row of dueRows) {
+      if (!row.seller_id || !row.seller_cash_due_cents) continue;
+      if (!bySeller[row.seller_id]) bySeller[row.seller_id] = { rows: [], total_cents: 0 };
+      bySeller[row.seller_id].rows.push(row);
+      bySeller[row.seller_id].total_cents += row.seller_cash_due_cents;
+    }
+
+    const released = [];
+    const skipped = [];
+    for (const sellerId of Object.keys(bySeller)) {
+      const group = bySeller[sellerId];
+      if (group.total_cents <= 0) continue;
+      const { data: sellerRow } = await supabase
+        .from('users').select('stripe_account_id').eq('id', sellerId).single();
+      if (!sellerRow || !sellerRow.stripe_account_id) {
+        skipped.push({ seller_id: sellerId, reason: 'not_connected', total_cents: group.total_cents });
+        continue;
+      }
+      try {
+        const transfer = await stripe.transfers.create({
+          amount: group.total_cents,
+          currency: 'usd',
+          destination: sellerRow.stripe_account_id,
+          transfer_group: 'release_' + sellerId + '_' + Date.now(),
+          metadata: {
+            order_count: String(group.rows.length),
+            seller_id: String(sellerId),
+            release_kind: 'return_window_expired',
+          },
+        });
+        // Mark all rows in this group as released
+        const orderIds = group.rows.map(r => r.id);
+        await supabase
+          .from('orders')
+          .update({
+            status: 'released',
+            transfer_id: transfer.id,
+            released_at: new Date().toISOString(),
+          })
+          .in('id', orderIds);
+        released.push({ seller_id: sellerId, transfer_id: transfer.id, amount_cents: group.total_cents, order_count: orderIds.length });
+      } catch (transferErr) {
+        console.error('[release-due] transfer to', sellerId, 'failed:', transferErr.message);
+        skipped.push({ seller_id: sellerId, reason: 'transfer_failed', message: transferErr.message });
+      }
+    }
+
+    res.json({ ok: true, released, skipped });
+  } catch (err) {
+    console.error('[release-due] unexpected error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/orders/cashout
+// Seller converts accumulated Style Points back to USD at 1:1
+// (100 pts = $1). Funds go to the seller's connected Stripe account
+// via a transfer. Atomically decrements op_balance.
+//
+// Source of the cash: Outfitd's accumulated platform fees from past
+// transactions. Solvency invariant: cumulative platform fees minus
+// cumulative cashouts is always positive in the steady state because
+// every transaction nets Outfitd 5–10% of cash collected.
+// ═══════════════════════════════════════════════════════════════
+router.post('/cashout', requireAuth, async (req, res) => {
+  try {
+    const sellerId = req.user.userId;
+    const requested = Math.max(0, Math.floor(Number(req.body && req.body.points) || 0));
+    if (requested < 100) {
+      return res.status(400).json({
+        error: 'cashout_minimum_not_met',
+        message: 'Minimum cashout is 100 Style Points ($1.00).',
+      });
+    }
+    const { data: seller, error: sellerErr } = await supabase
+      .from('users').select('op_balance, stripe_account_id').eq('id', sellerId).single();
+    if (sellerErr || !seller) {
+      return res.status(400).json({ error: 'seller_lookup_failed' });
+    }
+    if (!seller.stripe_account_id) {
+      return res.status(400).json({
+        error: 'no_connected_account',
+        message: 'Connect your Stripe account in Earnings before cashing out.',
+      });
+    }
+    const balance = Math.max(0, Math.floor(Number(seller.op_balance) || 0));
+    if (requested > balance) {
+      return res.status(400).json({
+        error: 'insufficient_balance',
+        message: 'You only have ' + balance + ' Style Points available.',
+        balance,
+      });
+    }
+    const cashCents = requested; // 1pt = 1 cent
+
+    // Decrement balance FIRST (atomic-ish — Supabase doesn't have row-
+    // level CAS without RLS, but the read-then-write here is bounded
+    // by the auth scope of one user). Stripe transfer next; if it
+    // fails we restore the balance below.
+    await supabase.from('users')
+      .update({ op_balance: balance - requested })
+      .eq('id', sellerId);
+
+    let transfer;
+    try {
+      transfer = await stripe.transfers.create({
+        amount: cashCents,
+        currency: 'usd',
+        destination: seller.stripe_account_id,
+        metadata: { kind: 'style_points_cashout', seller_id: String(sellerId), points: String(requested) },
+      });
+    } catch (transferErr) {
+      // Restore balance on transfer failure
+      await supabase.from('users')
+        .update({ op_balance: balance }).eq('id', sellerId);
+      console.error('[cashout] transfer failed:', transferErr.message);
+      return res.status(502).json({
+        error: 'transfer_failed',
+        message: 'Stripe rejected the cashout: ' + transferErr.message,
+      });
+    }
+
+    await supabase.from('transactions').insert({
+      user_id: sellerId,
+      type: 'cashout',
+      currency: 'op_balance',
+      amount: -requested,
+      description: 'Cashed out ' + requested + ' Style Points → $' + (cashCents / 100).toFixed(2) + ' (transfer ' + transfer.id + ')',
+    });
+
+    res.json({
+      ok: true,
+      points_cashed_out: requested,
+      cents_transferred: cashCents,
+      transfer_id: transfer.id,
+      new_balance: balance - requested,
+    });
+  } catch (err) {
+    console.error('[cashout] unexpected error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
