@@ -30,7 +30,7 @@ function requireAuth(req, res, next) {
 // GET /api/orders — Fetch user's order history
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user.userId;
     const { data: orders, error } = await supabase
       .from('orders')
       .select('*')
@@ -82,7 +82,7 @@ router.get('/', requireAuth, async (req, res) => {
 router.post('/create', requireAuth, async (req, res) => {
   try {
     const { items, shipping_address, email, payment_method, store_credit_applied } = req.body;
-    const userId = req.user.id;
+    const userId = req.user.userId;
 
     if (!items || !items.length) {
       return res.status(400).json({ error: 'No items provided' });
@@ -222,6 +222,172 @@ router.post('/create', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// POST /api/orders/confirm-payment
+// Called by the frontend after Stripe.js confirms a PaymentIntent.
+// Verifies the PaymentIntent succeeded with Stripe, then writes one
+// order row per cart item. Idempotent: re-calling with the same
+// payment_intent_id returns the previously-inserted order IDs without
+// double-charging anyone (the source of truth is the (buyer, listing,
+// stripe_payment_id) tuple).
+// ═══════════════════════════════════════════════════════════════
+router.post('/confirm-payment', requireAuth, async (req, res) => {
+  const { payment_intent_id, items, shipping_address, email } = req.body || {};
+  const buyerId = req.user.userId;
+  if (!payment_intent_id) {
+    return res.status(400).json({ error: 'payment_intent_id required' });
+  }
+
+  try {
+    // 1) Verify with Stripe — never trust the client to say "I paid"
+    const intent = await stripe.paymentIntents.retrieve(payment_intent_id);
+    if (intent.status !== 'succeeded') {
+      console.warn('[confirm-payment] PaymentIntent not succeeded:',
+        payment_intent_id, intent.status);
+      return res.status(400).json({
+        error: 'Payment not completed',
+        intent_status: intent.status,
+      });
+    }
+
+    // 2) Idempotency: if we've already recorded any rows for this
+    //    payment_intent_id, return them unchanged.
+    const { data: existing } = await supabase
+      .from('orders')
+      .select('id, listing_id, seller_id')
+      .eq('stripe_payment_id', payment_intent_id);
+    if (existing && existing.length > 0) {
+      return res.json({
+        ok: true,
+        already_recorded: true,
+        order_ids: existing.map(o => o.id),
+      });
+    }
+
+    // 3) Decide what to insert. If the frontend forwarded the cart
+    //    (the normal happy path), one order row per item. If not (e.g.
+    //    on a 3DS redirect-return where the form is gone), fall back
+    //    to a single row keyed off the PaymentIntent total — better to
+    //    record an under-detailed order than to lose it entirely.
+    const rows = [];
+    if (Array.isArray(items) && items.length > 0) {
+      for (const item of items) {
+        const unitPrice = Number(item.price) || 0;
+        const qty = Number(item.qty) || 1;
+        rows.push({
+          buyer_id: buyerId,
+          seller_id: item.seller_id || item.sellerId || null,
+          listing_id: item.product_id || item.id || null,
+          total: Math.round(unitPrice * qty * 100), // store cents
+          stripe_payment_id: payment_intent_id,
+          shipping_address: shipping_address || null,
+          status: 'paid',
+        });
+      }
+    } else {
+      rows.push({
+        buyer_id: buyerId,
+        seller_id: null,
+        listing_id: null,
+        total: intent.amount, // already in cents
+        stripe_payment_id: payment_intent_id,
+        shipping_address: shipping_address || null,
+        status: 'paid',
+      });
+    }
+
+    const orderIds = [];
+    const insertErrors = [];
+    for (const row of rows) {
+      const { data, error } = await supabase
+        .from('orders').insert(row).select('id').single();
+      if (error) {
+        insertErrors.push(error.message || String(error));
+        console.error('[confirm-payment] insert failed:',
+          error.code || '(no code)', error.message || '(no message)',
+          'row:', JSON.stringify(row));
+        continue;
+      }
+      if (data && data.id) orderIds.push(data.id);
+    }
+
+    if (orderIds.length === 0) {
+      // Fail loud — Stripe charged but we didn't record anything.
+      // The frontend should surface this to the user with support contact info.
+      return res.status(500).json({
+        error: 'Payment succeeded but order could not be recorded. Please contact support with this reference.',
+        payment_intent_id,
+        details: insertErrors.join('; '),
+      });
+    }
+
+    // Optional buyer-side email/handle update for downstream display
+    if (email) {
+      await supabase
+        .from('orders')
+        .update({ buyer_email: email })
+        .eq('stripe_payment_id', payment_intent_id);
+    }
+
+    res.json({ ok: true, order_ids: orderIds, payment_intent_id });
+  } catch (err) {
+    console.error('[confirm-payment] error:', err);
+    res.status(500).json({
+      error: err.message || 'Failed to confirm payment',
+      payment_intent_id,
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// GET /api/orders/seller
+// Returns orders where the current user is the seller. Powers the
+// seller dashboard's orders tab (which previously tried to filter the
+// buyer's order list — which never contains the seller's own sales).
+// ═══════════════════════════════════════════════════════════════
+router.get('/seller', requireAuth, async (req, res) => {
+  try {
+    const sellerId = req.user.userId;
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*, seller_listings(title, images)')
+      .eq('seller_id', sellerId)
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) {
+      console.warn('GET /api/orders/seller — query failed, returning []:',
+        error.code || '(no code)', error.message || '(no message)');
+      return res.json({ orders: [] });
+    }
+    // Reshape into the shape the seller dashboard render template expects.
+    // The frontend filters `o.items` by `i.brand === sellerName`, so we set
+    // brand = the seller's own display name to make the existing filter pass.
+    const { data: seller } = await supabase
+      .from('users').select('name, handle').eq('id', sellerId).single();
+    const sellerName = (seller && (seller.name || seller.handle)) || 'Seller';
+
+    const shaped = (data || []).map(o => {
+      const listing = o.seller_listings || {};
+      const addr = o.shipping_address || {};
+      const addrStr = typeof o.shipping_address === 'string'
+        ? o.shipping_address
+        : [addr.street, addr.city, addr.state, addr.zip].filter(Boolean).join(', ');
+      return {
+        id: o.id,
+        items: [{ brand: sellerName, name: listing.title || 'Item', size: '' }],
+        shippingAddress: addrStr,
+        total: (o.total || 0) / 100, // dollars (frontend expects dollars)
+        status: o.status || 'paid',
+        createdAt: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
+      };
+    });
+    res.json({ orders: shaped });
+  } catch (err) {
+    console.error('GET /api/orders/seller error:', err);
+    res.status(500).json({ error: 'Failed to fetch seller orders' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
 // GET /api/orders/history
 // Returns the user's past orders
 // ═══════════════════════════════════════════════════════════════
@@ -230,7 +396,7 @@ router.get('/history', requireAuth, async (req, res) => {
     const { data, error } = await supabase
       .from('orders')
       .select('*')
-      .eq('user_id', req.user.id)
+      .eq('user_id', req.user.userId)
       .order('created_at', { ascending: false })
       .limit(50);
 
@@ -251,7 +417,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       .from('orders')
       .select('*')
       .eq('order_number', req.params.id)
-      .eq('user_id', req.user.id)
+      .eq('user_id', req.user.userId)
       .single();
 
     if (error || !data) return res.status(404).json({ error: 'Order not found' });

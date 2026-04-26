@@ -101,6 +101,42 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
         break;
       }
 
+      case 'payment_intent.succeeded': {
+        // Safety net for the inline Stripe Element flow: if the frontend
+        // confirm-payment call never reaches the backend (browser closed,
+        // network glitch after Stripe success), we still record the order
+        // here. Idempotent — skipped if any row already exists for this PI.
+        const intent = event.data.object;
+        const piId = intent.id;
+        const { data: existing } = await supabase
+          .from('orders').select('id').eq('stripe_payment_id', piId).limit(1);
+        if (existing && existing.length > 0) {
+          console.log('[webhook] payment_intent.succeeded ' + piId + ' — already recorded, skipping');
+          break;
+        }
+        // We don't have item-level cart data here (it's not in PI metadata
+        // today), so insert one summary row keyed off the PI total. Ops can
+        // join with the Stripe dashboard for line-item detail until the
+        // create-intent flow is updated to stash items in PI metadata.
+        const { error: webhookInsertErr } = await supabase.from('orders').insert({
+          buyer_id: null,
+          seller_id: null,
+          listing_id: null,
+          total: intent.amount,
+          stripe_payment_id: piId,
+          shipping_address: intent.shipping || null,
+          status: 'paid_unrecorded',
+        });
+        if (webhookInsertErr) {
+          console.error('[webhook] payment_intent.succeeded insert failed:',
+            webhookInsertErr.code, webhookInsertErr.message);
+        } else {
+          console.warn('[webhook] payment_intent.succeeded ' + piId +
+            ' — recorded with status=paid_unrecorded (frontend confirm-payment did not reach us)');
+        }
+        break;
+      }
+
       case 'checkout.session.expired': {
         const session = event.data.object;
         if (session.metadata && session.metadata.order_id) {
