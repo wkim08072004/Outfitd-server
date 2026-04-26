@@ -157,19 +157,55 @@ router.post('/create-intent', async (req, res) => {
       return res.status(400).json({ error: 'Order total below Stripe minimum (50 cents)' });
     }
 
-    const intent = await stripe.paymentIntents.create({
+    // ── Stripe Connect payout routing ──────────────────────────
+    // If every item is from one seller AND that seller has finished
+    // Stripe Connect onboarding, route the charge as a "destination
+    // charge": Stripe accepts the buyer's payment, takes our 10%
+    // application fee, and the rest lands in the seller's connected
+    // account. No manual transfer needed.
+    //
+    // For multi-seller carts (or sellers who haven't connected yet),
+    // we charge to the platform account only; ops reconciles via
+    // manual transfers from the Stripe dashboard until we ship a
+    // proper Separate-Charges-and-Transfers flow.
+    const distinctSellers = new Set(
+      validatedItems.map(it => it.seller_id).filter(Boolean)
+    );
+    const intentArgs = {
       amount: totalCents,
       currency,
       automatic_payment_methods: { enabled: true },
-      // Stash a compact reference so confirm-payment can re-verify and
-      // the webhook safety net has something to identify the buyer.
       metadata: {
         item_count: String(validatedItems.length),
         subtotal_cents: String(subtotalCents),
         shipping_cents: String(shippingCents),
         tax_cents: String(taxCents),
       },
-    });
+    };
+    if (distinctSellers.size === 1) {
+      const onlySellerId = distinctSellers.values().next().value;
+      const { data: sellerRow } = await supabase
+        .from('users')
+        .select('stripe_account_id')
+        .eq('id', onlySellerId)
+        .single();
+      const sellerStripeId = sellerRow && sellerRow.stripe_account_id;
+      if (sellerStripeId) {
+        // Application fee = 10% of subtotal (NEVER on shipping or tax).
+        // Stripe's API expects the fee in cents.
+        const applicationFeeCents = Math.round(subtotalCents * 0.10);
+        intentArgs.transfer_data = { destination: sellerStripeId };
+        intentArgs.application_fee_amount = applicationFeeCents;
+        intentArgs.metadata.payout_routing = 'destination_charge';
+        intentArgs.metadata.seller_stripe_id = sellerStripeId;
+      } else {
+        intentArgs.metadata.payout_routing = 'platform_only_seller_unconnected';
+      }
+    } else if (distinctSellers.size > 1) {
+      intentArgs.metadata.payout_routing = 'platform_only_multi_seller';
+    }
+
+    const intent = await stripe.paymentIntents.create(intentArgs);
     res.json({
       client_secret: intent.client_secret,
       amount_cents: totalCents,
