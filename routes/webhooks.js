@@ -103,9 +103,9 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
 
       case 'payment_intent.succeeded': {
         // Safety net for the inline Stripe Element flow: if the frontend
-        // confirm-payment call never reaches the backend (browser closed,
-        // network glitch after Stripe success), we still record the order
-        // here. Idempotent — skipped if any row already exists for this PI.
+        // confirm-payment call never reaches us (browser closed, network
+        // glitch right after Stripe success), record the order here.
+        // Idempotent — skipped entirely if any row already exists for the PI.
         const intent = event.data.object;
         const piId = intent.id;
         const { data: existing } = await supabase
@@ -114,25 +114,60 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
           console.log('[webhook] payment_intent.succeeded ' + piId + ' — already recorded, skipping');
           break;
         }
-        // We don't have item-level cart data here (it's not in PI metadata
-        // today), so insert one summary row keyed off the PI total. Ops can
-        // join with the Stripe dashboard for line-item detail until the
-        // create-intent flow is updated to stash items in PI metadata.
+        // Identify the buyer via the Stripe Customer ID stashed on the user
+        // row at first checkout. Without this we can't credit Style Points
+        // or attribute the order — fall back to a placeholder row.
+        let buyerId = null;
+        let buyerOpBalance = 0;
+        let buyerSubscription = 'free';
+        if (intent.customer) {
+          const { data: buyer } = await supabase
+            .from('users')
+            .select('id, op_balance, subscription')
+            .eq('stripe_customer_id', intent.customer)
+            .single();
+          if (buyer) {
+            buyerId = buyer.id;
+            buyerOpBalance = buyer.op_balance || 0;
+            buyerSubscription = buyer.subscription || 'free';
+          }
+        }
         const { error: webhookInsertErr } = await supabase.from('orders').insert({
-          buyer_id: null,
+          buyer_id: buyerId,
           seller_id: null,
           listing_id: null,
-          total: intent.amount,
+          total: intent.amount, // cents
           stripe_payment_id: piId,
           shipping_address: intent.shipping || null,
-          status: 'paid_unrecorded',
+          status: buyerId ? 'paid' : 'paid_unrecorded',
         });
         if (webhookInsertErr) {
           console.error('[webhook] payment_intent.succeeded insert failed:',
             webhookInsertErr.code, webhookInsertErr.message);
-        } else {
-          console.warn('[webhook] payment_intent.succeeded ' + piId +
-            ' — recorded with status=paid_unrecorded (frontend confirm-payment did not reach us)');
+          break;
+        }
+        console.warn('[webhook] payment_intent.succeeded ' + piId +
+          ' — recorded via webhook (frontend confirm did not reach us)');
+        // Best-effort Style Points award if we identified the buyer. Use the
+        // PI amount as a proxy for subtotal — over-credits a buyer by a few
+        // pts on the shipping/tax delta but never under-credits.
+        if (buyerId) {
+          const tierRate = buyerSubscription === 'legend' ? 0.10
+            : buyerSubscription === 'insider' ? 0.07 : 0.05;
+          const pointsAwarded = Math.round(intent.amount * tierRate);
+          if (pointsAwarded > 0) {
+            await supabase
+              .from('users')
+              .update({ op_balance: buyerOpBalance + pointsAwarded })
+              .eq('id', buyerId);
+            await supabase.from('transactions').insert({
+              user_id: buyerId,
+              type: 'purchase_reward',
+              currency: 'op_balance',
+              amount: pointsAwarded,
+              description: 'Order reward (webhook): +' + pointsAwarded + ' Style Points',
+            });
+          }
         }
         break;
       }
