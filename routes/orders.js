@@ -275,20 +275,37 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
     }
 
     // 3) Decide what to insert. If the frontend forwarded the cart
-    //    (the normal happy path), one order row per item. If not (e.g.
-    //    on a 3DS redirect-return where the form is gone), fall back
-    //    to a single row keyed off the PaymentIntent total — better to
-    //    record an under-detailed order than to lose it entirely.
+    //    (the normal happy path), one order row per item — and we attribute
+    //    the seller's per-seller shipping fee to the FIRST item from that
+    //    seller (sellers ship as one package per buyer, so shipping is paid
+    //    once per seller, not per item). If items aren't provided (e.g. on
+    //    a 3DS redirect-return where the form is gone), fall back to a
+    //    single row keyed off the PaymentIntent total.
     const rows = [];
     if (Array.isArray(items) && items.length > 0) {
+      // Compute per-seller shipping (MAX of items' shipping_price) and
+      // attribute it once per seller — same rule as the frontend cart.
+      const sellerShipping = {};
+      const sellerShippingClaimed = {};
+      for (const item of items) {
+        const sid = item.seller_id || item.sellerId || '__unknown__';
+        const ship = Number(item.shipping_price);
+        const v = Number.isFinite(ship) ? Math.max(0, ship) : 4;
+        if (sellerShipping[sid] === undefined || v > sellerShipping[sid]) sellerShipping[sid] = v;
+      }
       for (const item of items) {
         const unitPrice = Number(item.price) || 0;
         const qty = Number(item.qty) || 1;
+        const sid = item.seller_id || item.sellerId || '__unknown__';
+        // First row for this seller pays the seller's shipping fee
+        const shippingForRow = sellerShippingClaimed[sid] ? 0 : (sellerShipping[sid] || 0);
+        sellerShippingClaimed[sid] = true;
+        const itemTotalCents = Math.round((unitPrice * qty + shippingForRow) * 100);
         rows.push({
           buyer_id: buyerId,
           seller_id: item.seller_id || item.sellerId || null,
           listing_id: item.product_id || item.id || null,
-          total: Math.round(unitPrice * qty * 100), // store cents
+          total: itemTotalCents,
           stripe_payment_id: payment_intent_id,
           shipping_address: shipping_address || null,
           status: 'paid',

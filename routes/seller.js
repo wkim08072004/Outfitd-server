@@ -79,6 +79,17 @@ function buildListingRow(body, user) {
 
   // The shop reader in index.html tries JSON.parse(description) to recover
   // metadata that doesn't have its own column. We preserve that contract.
+  // shipping_price is stashed here too — keeps us off a schema migration
+  // for launch while making the seller-set shipping field round-trip cleanly.
+  // Cap is enforced server-side as well as client-side: shipping cannot exceed
+  // 50% of item price (anti-gaming) or $50 absolute.
+  const itemPrice = Number(body.price) || 0;
+  const requestedShip = Number(body.shipping_price);
+  const shipCap = Math.min(50, Math.max(0, itemPrice * 0.5));
+  const shippingPrice = Number.isFinite(requestedShip)
+    ? Math.max(0, Math.min(requestedShip, shipCap))
+    : 4;
+
   const descriptionJson = JSON.stringify({
     desc: body.desc || '',
     condition: body.condition || 'New',
@@ -89,6 +100,7 @@ function buildListingRow(body, user) {
     photoFit: body.photoFit || 'cover',
     localId: body.localId || null,
     style: body.style || 'Streetwear',
+    shipping_price: shippingPrice,
   });
 
   return {
@@ -117,12 +129,19 @@ function buildListingRow(body, user) {
 }
 
 // Frontend compatibility: add camelCase aliases for sellerEmail / localId so
-// index.html's merge helpers match either casing.
+// index.html's merge helpers match either casing. Also surfaces fields stashed
+// inside the description JSON (shipping_price etc.) as top-level properties
+// so the cart and product card can read them without re-parsing the blob.
 function shapeListingForClient(r) {
+  let stashed = {};
+  if (r && typeof r.description === 'string') {
+    try { stashed = JSON.parse(r.description) || {}; } catch (e) { stashed = {}; }
+  }
   return {
     ...r,
     sellerEmail: r.seller_email || null,
     localId: r.local_id || null,
+    shipping_price: typeof stashed.shipping_price === 'number' ? stashed.shipping_price : 4,
   };
 }
 
