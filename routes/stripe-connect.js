@@ -38,6 +38,85 @@ function userIdOf(req) {
   return req.user && (req.user.userId || req.user.id);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// GET /api/stripe-connect/diagnose
+// Public endpoint (no auth) that returns enough information to
+// verify the Stripe key Render is actually using right now,
+// without exposing any secrets. Pings stripe.balance.retrieve()
+// and platforms.tryCapability() so we can tell exactly what's
+// failing — key prefix, account ID, mode, and whether Connect
+// is activated.
+// ═══════════════════════════════════════════════════════════════
+router.get('/diagnose', async (req, res) => {
+  const out = {
+    timestamp: new Date().toISOString(),
+    secret_key: { prefix: '(missing)', mode: '(unknown)', length: 0 },
+    balance: null,
+    accounts_create_check: null,
+    notes: [],
+  };
+  try {
+    const sk = process.env.STRIPE_SECRET_KEY || '';
+    if (!sk) {
+      out.notes.push('STRIPE_SECRET_KEY env var is not set on Render.');
+      return res.json(out);
+    }
+    out.secret_key.prefix = sk.slice(0, 12) + '…';
+    out.secret_key.length = sk.length;
+    if (sk.startsWith('sk_test_')) out.secret_key.mode = 'TEST';
+    else if (sk.startsWith('sk_live_')) out.secret_key.mode = 'LIVE';
+    else out.secret_key.mode = 'UNKNOWN';
+
+    // 1. Verify the key works at all by hitting balance retrieve
+    try {
+      const bal = await stripe.balance.retrieve();
+      out.balance = {
+        ok: true,
+        available_count: (bal.available || []).length,
+      };
+    } catch (e) {
+      out.balance = { ok: false, message: e.message, code: e.code || null };
+    }
+
+    // 2. Try to create a Connect account in dry-run mode (we'll
+    //    catch and inspect the error to determine if Connect is
+    //    activated). Use a clearly-fake email so any accidentally-
+    //    created account is identifiable.
+    try {
+      const probe = await stripe.accounts.create({
+        type: 'express',
+        email: 'connect-diagnostic-probe@outfitd.co',
+        capabilities: { transfers: { requested: true } },
+        business_type: 'individual',
+      });
+      out.accounts_create_check = {
+        ok: true,
+        probe_account_id: probe.id,
+        note: 'Connect IS activated. You can delete this probe account from the Stripe dashboard.',
+      };
+      // Clean up the probe account to keep the Connect roster tidy
+      try { await stripe.accounts.del(probe.id); } catch (cleanupErr) {
+        out.accounts_create_check.cleanup_warning = cleanupErr.message;
+      }
+    } catch (e) {
+      out.accounts_create_check = {
+        ok: false,
+        message: e.message,
+        code: e.code || null,
+        type: e.type || null,
+      };
+      const m = (e.message || '').toLowerCase();
+      if (m.includes('signed up for connect') || (m.includes('platform') && m.includes('connect'))) {
+        out.notes.push('Stripe is rejecting because Connect is not activated on the account this key belongs to. If the key is sk_live_..., apply for live Connect at https://dashboard.stripe.com/connect/onboarding (no /test/). If the key is sk_test_..., go to https://dashboard.stripe.com/test/connect/onboarding and click Get started.');
+      }
+    }
+
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message, partial: out });
+  }
+});
+
 // Best-effort persist of stripe_account_id onto users. If the column
 // doesn't exist yet (pre-migration), log a clear warning so ops can
 // add it without 500-ing the seller's onboarding flow.
