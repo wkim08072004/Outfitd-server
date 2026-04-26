@@ -54,7 +54,13 @@ const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_
 // ── SIGNUP ──────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
-        const { email, password, handle, displayName, isSeller } = req.body;
+        // SECURITY (audit §1.5): we deliberately do NOT destructure isSeller
+        // from the body. The frontend used to send isSeller:true to flip the
+        // user into a seller role at signup, but localStorage-based seller
+        // invite codes were trivially bypassable. New users always start as
+        // 'user'. Sellers are upgraded by an admin via the seller-application
+        // flow + a server-validated invite, never by client claim.
+        const { email, password, handle, displayName } = req.body;
 
         if (!email || !password || !handle)
             return res.status(400).json({ error: 'Email, password and handle are required' });
@@ -92,7 +98,7 @@ router.post('/signup', async (req, res) => {
             display_name: displayName || handle,
             password_hash,
             referral_code,
-            role: isSeller ? 'seller' : 'user'
+            role: 'user'
         })
         .select(SAFE_SELECT)
         .single();

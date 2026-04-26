@@ -274,37 +274,95 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
       });
     }
 
-    // 3) Decide what to insert. If the frontend forwarded the cart
-    //    (the normal happy path), one order row per item — and we attribute
-    //    the seller's per-seller shipping fee to the FIRST item from that
-    //    seller (sellers ship as one package per buyer, so shipping is paid
-    //    once per seller, not per item). If items aren't provided (e.g. on
-    //    a 3DS redirect-return where the form is gone), fall back to a
-    //    single row keyed off the PaymentIntent total.
+    // 3) Decide what to insert. SECURITY (audit §1.7): we look up
+    //    canonical prices from seller_listings for every item rather
+    //    than trusting whatever the cart payload says. The PaymentIntent
+    //    we created at /api/payments/create-intent was already priced
+    //    server-side, so this is belt-and-suspenders: the order rows we
+    //    write match the DB's canonical prices, not the client's cart.
+    //    Each seller's shipping fee is paid once per order (attributed
+    //    to the first row for that seller, others get $0 shipping —
+    //    sellers pack multiple items in one package).
     const rows = [];
     if (Array.isArray(items) && items.length > 0) {
-      // Compute per-seller shipping (MAX of items' shipping_price) and
-      // attribute it once per seller — same rule as the frontend cart.
+      const productIds = items.map(it => it.product_id || it.id).filter(Boolean);
+      let listingMap = {};
+      try {
+        // Inline lookup so we don't have to share the helper across
+        // route files. Same shape as payments.js's lookupListings.
+        const localCandidates = new Set();
+        const uuidCandidates = new Set();
+        for (const raw of productIds) {
+          const r = String(raw).trim();
+          if (!r) continue;
+          localCandidates.add(r);
+          if (r.startsWith('dyn_')) localCandidates.add(r.slice(4));
+          else localCandidates.add('dyn_' + r);
+          if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(r)) {
+            uuidCandidates.add(r);
+          }
+        }
+        function parseShip(d) {
+          if (typeof d !== 'string') return 4;
+          try { const m = JSON.parse(d); if (typeof m.shipping_price === 'number') return m.shipping_price; } catch (e) {}
+          return 4;
+        }
+        if (localCandidates.size) {
+          const { data } = await supabase
+            .from('seller_listings')
+            .select('id, local_id, price, description, seller_id')
+            .in('local_id', Array.from(localCandidates));
+          for (const row of (data || [])) {
+            const rec = { listing_id: row.id, price: Number(row.price) || 0, shipping_price: parseShip(row.description), seller_id: row.seller_id };
+            if (row.id) listingMap[row.id] = rec;
+            if (row.local_id) {
+              listingMap[row.local_id] = rec;
+              listingMap['dyn_' + row.local_id] = rec;
+            }
+          }
+        }
+        const stillMissing = [...uuidCandidates].filter(id => !listingMap[id]);
+        if (stillMissing.length) {
+          const { data } = await supabase
+            .from('seller_listings')
+            .select('id, local_id, price, description, seller_id')
+            .in('id', stillMissing);
+          for (const row of (data || [])) {
+            const rec = { listing_id: row.id, price: Number(row.price) || 0, shipping_price: parseShip(row.description), seller_id: row.seller_id };
+            if (row.id) listingMap[row.id] = rec;
+            if (row.local_id) listingMap[row.local_id] = rec;
+          }
+        }
+      } catch (lookupErr) {
+        console.warn('[confirm-payment] listing lookup failed, falling back to client values:',
+          lookupErr.message);
+        listingMap = {};
+      }
+
+      // Per-seller MAX shipping using canonical values where available.
       const sellerShipping = {};
+      for (const item of items) {
+        const id = item.product_id || item.id;
+        const canonical = listingMap[id];
+        const ship = canonical ? canonical.shipping_price
+                               : (Number.isFinite(Number(item.shipping_price)) ? Number(item.shipping_price) : 4);
+        const sid = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || '__unknown__';
+        if (sellerShipping[sid] === undefined || ship > sellerShipping[sid]) sellerShipping[sid] = ship;
+      }
       const sellerShippingClaimed = {};
       for (const item of items) {
-        const sid = item.seller_id || item.sellerId || '__unknown__';
-        const ship = Number(item.shipping_price);
-        const v = Number.isFinite(ship) ? Math.max(0, ship) : 4;
-        if (sellerShipping[sid] === undefined || v > sellerShipping[sid]) sellerShipping[sid] = v;
-      }
-      for (const item of items) {
-        const unitPrice = Number(item.price) || 0;
-        const qty = Number(item.qty) || 1;
-        const sid = item.seller_id || item.sellerId || '__unknown__';
-        // First row for this seller pays the seller's shipping fee
+        const id = item.product_id || item.id;
+        const canonical = listingMap[id];
+        const unitPrice = canonical ? canonical.price : (Number(item.price) || 0);
+        const qty = Math.max(1, Math.min(99, Number(item.qty) || 1));
+        const sid = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || '__unknown__';
         const shippingForRow = sellerShippingClaimed[sid] ? 0 : (sellerShipping[sid] || 0);
         sellerShippingClaimed[sid] = true;
         const itemTotalCents = Math.round((unitPrice * qty + shippingForRow) * 100);
         rows.push({
           buyer_id: buyerId,
-          seller_id: item.seller_id || item.sellerId || null,
-          listing_id: item.product_id || item.id || null,
+          seller_id: (canonical && canonical.seller_id) || item.seller_id || item.sellerId || null,
+          listing_id: (canonical && canonical.listing_id) || item.product_id || item.id || null,
           total: itemTotalCents,
           stripe_payment_id: payment_intent_id,
           shipping_address: shipping_address || null,
