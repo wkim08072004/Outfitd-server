@@ -14,14 +14,39 @@ const supabase = createClient(
 );
 
 // ── Helpers ──────────────────────────────────────────────────────────────
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  let decoded;
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
   } catch (e) {
     return res.status(401).json({ error: 'Invalid token' });
+  }
+  // Read role fresh from DB on every request so role changes (e.g. promoting
+  // a user to seller) take effect immediately without requiring re-login.
+  // The JWT may carry a stale role or no role field at all depending on how
+  // it was signed at login time.
+  try {
+    const userId = decoded.id || decoded.userId || decoded.sub || decoded.user_id;
+    if (userId) {
+      const { data: dbUser, error: dbErr } = await supabase
+        .from('users')
+        .select('id, email, handle, display_name, role')
+        .eq('id', userId)
+        .single();
+      if (!dbErr && dbUser) {
+        req.user = Object.assign({}, decoded, dbUser);
+        return next();
+      }
+    }
+    // DB lookup yielded nothing — trust the JWT rather than locking the user out
+    req.user = decoded;
+    next();
+  } catch (e) {
+    // DB error — trust the JWT rather than locking the user out
+    req.user = decoded;
+    next();
   }
 }
 
