@@ -687,22 +687,66 @@ router.get('/seller', requireAuth, async (req, res) => {
       .from('users').select('name, handle').eq('id', sellerId).single();
     const sellerName = (seller && (seller.name || seller.handle)) || 'Seller';
 
+    // Per-row hold/release status — UI shows "in hold until DATE" vs "available"
+    const nowMs = Date.now();
     const shaped = (data || []).map(o => {
       const listing = o.seller_listings || {};
       const addr = o.shipping_address || {};
       const addrStr = typeof o.shipping_address === 'string'
         ? o.shipping_address
         : [addr.street, addr.city, addr.state, addr.zip].filter(Boolean).join(', ');
+      const windowDays = Math.max(0, Number(o.return_window_days) || RETURN_WINDOW_DAYS);
+      const releaseAt = o.created_at
+        ? new Date(o.created_at).getTime() + windowDays * 24 * 60 * 60 * 1000
+        : null;
+      const inHold = releaseAt ? releaseAt > nowMs : false;
       return {
         id: o.id,
         items: [{ brand: sellerName, name: listing.title || 'Item', size: '' }],
         shippingAddress: addrStr,
-        total: (o.total || 0) / 100, // dollars (frontend expects dollars)
+        total: (o.total || 0) / 100,
+        sellerCashDue: (o.seller_cash_due_cents || 0) / 100,
+        sellerPointsDue: o.seller_points_due || 0,
         status: o.status || 'paid',
+        inHold: inHold,
+        releaseAt: releaseAt ? new Date(releaseAt).toISOString() : null,
+        transferId: o.transfer_id || null,
         createdAt: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
       };
     });
-    res.json({ orders: shaped });
+
+    // Earnings rollup so the dashboard can show available-vs-held without a
+    // second round-trip. Cash side comes from order rows; points side from the
+    // shared breakdown helper used by /cashout.
+    let cashAvailableCents = 0;
+    let cashHeldCents = 0;
+    let cashReleasedCents = 0; // already transferred out to seller's Stripe
+    for (const o of (data || [])) {
+      const due = Number(o.seller_cash_due_cents || 0);
+      if (!due) continue;
+      if (o.transfer_id) {
+        cashReleasedCents += due;
+      } else {
+        const windowDays = Math.max(0, Number(o.return_window_days) || RETURN_WINDOW_DAYS);
+        const releaseAt = o.created_at
+          ? new Date(o.created_at).getTime() + windowDays * 24 * 60 * 60 * 1000
+          : null;
+        if (releaseAt && releaseAt > nowMs) cashHeldCents += due;
+        else cashAvailableCents += due; // past window, awaiting next release-due sweep
+      }
+    }
+
+    const ptsBreakdown = await computeSellerPointsBreakdown(sellerId);
+
+    res.json({
+      orders: shaped,
+      earnings: {
+        cash_available_cents: cashAvailableCents,
+        cash_held_cents:      cashHeldCents,
+        cash_released_cents:  cashReleasedCents,
+        points: ptsBreakdown,
+      },
+    });
   } catch (err) {
     console.error('GET /api/orders/seller error:', err);
     res.status(500).json({ error: 'Failed to fetch seller orders' });
@@ -802,10 +846,90 @@ router.post('/release-due', requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// Helper: compute a seller's Style Points breakdown.
+//
+// Splits the seller's op_balance into three buckets so the dashboard can
+// show "X available / Y in hold" and the cashout endpoint can refuse
+// pre-window withdrawals:
+//
+//   total_earned_pts    sum of seller_points_due across every order
+//                       (how many points buyers have ever transferred
+//                       to this seller)
+//   held_pts            subset of total_earned_pts whose source orders
+//                       are still inside their 14-day return window —
+//                       still subject to clawback if the buyer refunds
+//   released_pts        total_earned_pts - held_pts
+//   prior_cashouts_pts  sum of past cashout transactions (positive)
+//   available_to_cashout  max(0, released_pts - prior_cashouts_pts)
+//                       capped at current op_balance so we never offer
+//                       to cash out points the user no longer holds
+//   next_release_at     ISO timestamp of the earliest order that's
+//                       still in window — UI shows "available DATE"
+// ═══════════════════════════════════════════════════════════════
+async function computeSellerPointsBreakdown(sellerId) {
+  const out = {
+    total_earned_pts: 0,
+    held_pts: 0,
+    released_pts: 0,
+    prior_cashouts_pts: 0,
+    available_to_cashout: 0,
+    op_balance: 0,
+    next_release_at: null,
+  };
+  if (!sellerId) return out;
+
+  const { data: userRow } = await supabase
+    .from('users').select('op_balance').eq('id', sellerId).single();
+  out.op_balance = Math.max(0, Math.floor(Number(userRow && userRow.op_balance) || 0));
+
+  const { data: rows } = await supabase
+    .from('orders')
+    .select('seller_points_due, created_at, return_window_days')
+    .eq('seller_id', sellerId);
+  const now = Date.now();
+  let earliestStillInWindow = null;
+  for (const r of (rows || [])) {
+    const pts = Math.max(0, Math.floor(Number(r.seller_points_due) || 0));
+    if (!pts) continue;
+    out.total_earned_pts += pts;
+    const windowDays = Math.max(0, Number(r.return_window_days) || RETURN_WINDOW_DAYS);
+    const releaseAt = new Date(r.created_at).getTime() + windowDays * 24 * 60 * 60 * 1000;
+    if (releaseAt > now) {
+      out.held_pts += pts;
+      if (!earliestStillInWindow || releaseAt < earliestStillInWindow) {
+        earliestStillInWindow = releaseAt;
+      }
+    } else {
+      out.released_pts += pts;
+    }
+  }
+  out.next_release_at = earliestStillInWindow ? new Date(earliestStillInWindow).toISOString() : null;
+
+  const { data: cashouts } = await supabase
+    .from('transactions')
+    .select('amount')
+    .eq('user_id', sellerId)
+    .eq('type', 'cashout');
+  out.prior_cashouts_pts = (cashouts || []).reduce(
+    (sum, t) => sum + Math.abs(Math.floor(Number(t.amount) || 0)), 0
+  );
+
+  out.available_to_cashout = Math.max(
+    0,
+    Math.min(out.released_pts - out.prior_cashouts_pts, out.op_balance)
+  );
+  return out;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // POST /api/orders/cashout
 // Seller converts accumulated Style Points back to USD at 1:1
 // (100 pts = $1). Funds go to the seller's connected Stripe account
 // via a transfer. Atomically decrements op_balance.
+//
+// Cashable amount is restricted to points whose source orders have
+// already passed their return window — points from in-window orders
+// are still subject to refund clawback so we don't release them yet.
 //
 // Source of the cash: Outfitd's accumulated platform fees from past
 // transactions. Solvency invariant: cumulative platform fees minus
@@ -833,14 +957,22 @@ router.post('/cashout', requireAuth, async (req, res) => {
         message: 'Connect your Stripe account in Earnings before cashing out.',
       });
     }
-    const balance = Math.max(0, Math.floor(Number(seller.op_balance) || 0));
-    if (requested > balance) {
+
+    const breakdown = await computeSellerPointsBreakdown(sellerId);
+    if (requested > breakdown.available_to_cashout) {
+      const heldNote = breakdown.held_pts > 0 && breakdown.next_release_at
+        ? ' ' + breakdown.held_pts + ' pts are still in their 14-day return window — earliest release ' +
+          new Date(breakdown.next_release_at).toLocaleDateString() + '.'
+        : '';
       return res.status(400).json({
-        error: 'insufficient_balance',
-        message: 'You only have ' + balance + ' Style Points available.',
-        balance,
+        error: 'insufficient_available_balance',
+        message: 'Only ' + breakdown.available_to_cashout +
+                 ' pts are past the return window and available to cash out.' + heldNote,
+        breakdown,
       });
     }
+
+    const balance = Math.max(0, Math.floor(Number(seller.op_balance) || 0));
     const cashCents = requested; // 1pt = 1 cent
 
     // Decrement balance FIRST (atomic-ish — Supabase doesn't have row-
