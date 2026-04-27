@@ -303,6 +303,7 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
     //    to the first row for that seller, others get $0 shipping —
     //    sellers pack multiple items in one package).
     const rows = [];
+    const insertErrors = [];
     let pointsRemainderToOutfitd = 0;
     if (Array.isArray(items) && items.length > 0) {
       const productIds = items.map(it => it.product_id || it.id).filter(Boolean);
@@ -396,13 +397,31 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
 
       const sellerShippingClaimed = {};
       const sellerPointsAttributed = {}; // sid -> pts assigned so far across rows
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       for (const item of items) {
         const id = item.product_id || item.id;
         const canonical = listingMap[id];
         const unitPrice = canonical ? canonical.price : (Number(item.price) || 0);
         const qty = Math.max(1, Math.min(99, Number(item.qty) || 1));
-        const sid = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || '__unknown__';
-        const sellerIdForRow = (canonical && canonical.seller_id) || item.seller_id || item.sellerId || null;
+
+        // The orders.seller_id column is a uuid FK to users(id). The cart's
+        // own item.seller_id is a `dyn_<email>` display token, NOT a real
+        // user id, so it's never safe to write directly. We require canonical
+        // lookup to succeed, OR a client-supplied seller_id that's a real
+        // UUID. Anything else means we couldn't resolve the listing's owner —
+        // refuse to record the row rather than silently mis-attributing it.
+        const candidateSid = (canonical && canonical.seller_id)
+          || (item.seller_id && UUID_RE.test(String(item.seller_id)) ? item.seller_id : null)
+          || (item.sellerId  && UUID_RE.test(String(item.sellerId))  ? item.sellerId  : null);
+        if (!candidateSid) {
+          insertErrors.push('seller_unresolved:' + (id || '(no id)'));
+          console.error('[confirm-payment] refusing row — cannot resolve seller for item:',
+            id, 'cart-supplied:', item.seller_id || item.sellerId || '(none)',
+            'canonical-hit:', !!canonical);
+          continue;
+        }
+        const sid = candidateSid;
+        const sellerIdForRow = candidateSid;
 
         const lineItemCents = Math.round(unitPrice * qty * 100);
         const shippingForRow = sellerShippingClaimed[sid]
@@ -477,7 +496,6 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
     }
 
     const orderIds = [];
-    const insertErrors = [];
     for (const row of rows) {
       const { data, error } = await supabase
         .from('orders').insert(row).select('id').single();
