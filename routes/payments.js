@@ -19,6 +19,22 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
+
+// Standard auth middleware shared with the rest of the app — JWT in cookie
+// OR Authorization header. Sets req.user.userId for downstream gates.
+function requireAuth(req, res, next) {
+  const token = (req.cookies && req.cookies.token)
+    || (req.headers.authorization || '').replace(/^Bearer\s+/, '');
+  if (!token) return res.status(401).json({ error: 'not_authenticated' });
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+}
+
 // Mirror frontend constants — keep in sync with index.html.
 const SHIPPING_FLAT_FEE_DEFAULT = 4;  // fallback when listing has no shipping_price
 const TAX_RATE = 0.08;                // 8% on item subtotal only
@@ -154,7 +170,7 @@ function parseShippingFromDescription(desc) {
 // redemption amount is also validated against the buyer's actual
 // op_balance; "I have a million Style Points" requests are rejected.
 // ═══════════════════════════════════════════════════════════════
-router.post('/create-intent', async (req, res) => {
+router.post('/create-intent', requireAuth, requireVerifiedEmail, async (req, res) => {
   try {
     const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
     const currency = (req.body && req.body.currency) || 'usd';

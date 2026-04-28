@@ -56,6 +56,13 @@ router.get('/confirm', async (req, res) => {
       .eq('id', decoded.userId)
       .eq('email', decoded.email);
 
+    // Audit §3.2: drop the requireVerifiedEmail cache for this user so the
+    // unlock takes effect immediately on the next gated call.
+    try {
+      const { invalidateVerifiedCache } = require('../middleware/requireVerifiedEmail');
+      invalidateVerifiedCache(decoded.userId);
+    } catch (_) {}
+
     res.json({ verified: true });
   } catch (err) {
     res.status(400).json({ error: 'Invalid or expired token' });

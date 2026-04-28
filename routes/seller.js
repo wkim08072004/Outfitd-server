@@ -13,6 +13,8 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
+const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 async function requireAuth(req, res, next) {
   const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
@@ -218,7 +220,7 @@ router.post('/partner-apply', requireAuth, async (req, res) => {
 // Writes to seller_listings (NOT products), mapped to every column the
 // frontend expects to read back.
 // ═══════════════════════════════════════════════════════════════
-router.post('/listings', requireAuth, requireSeller, async (req, res) => {
+router.post('/listings', requireAuth, requireSeller, requireVerifiedEmail, async (req, res) => {
   try {
     if (!req.body || !req.body.name || !req.body.price || Number(req.body.price) <= 0) {
       return res.status(400).json({ error: 'Name and valid price required' });

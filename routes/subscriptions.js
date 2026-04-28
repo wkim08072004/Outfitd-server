@@ -26,9 +26,10 @@ function requireAuth(req, res, next) {
 }
 
 // ── Tier → Stripe Price ID mapping ──
+// Member is the free default tier — no Stripe Product needed.
+// Insider is $9.99/mo. Legend was removed in the launch-prep pivot.
 const TIER_PRICES = {
   insider: process.env.STRIPE_INSIDER_PRICE_ID,
-  legend: process.env.STRIPE_LEGEND_PRICE_ID,
 };
 
 // ═══════════════════════════════════════════════════════════════
