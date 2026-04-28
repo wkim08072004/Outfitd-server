@@ -442,7 +442,10 @@ router.post('/forgot-password', async (req, res) => {
           console.error('Reset email failed:', emailErr);
         }
       } else {
-        console.log('RESEND_API_KEY not set. Reset URL:', resetUrl);
+        // RESEND_API_KEY is unset (dev mode). Don't log the full URL — it
+        // contains a single-use JWT reset token that grants password change
+        // for this account. In dev, look at the response or DB to retrieve.
+        console.log('RESEND_API_KEY not set; password reset email skipped for user', user.id);
       }
     }
 

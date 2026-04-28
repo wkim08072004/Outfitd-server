@@ -57,14 +57,14 @@ function requireSeller(req, res, next) {
   next();
 }
 
-// Identify admin by role OR by a known hardcoded handle (@wyk). If your
-// JWT payload uses a different field name for the handle, add it here.
+// Audit §1.4 follow-up: admin status is derived solely from users.role.
+// Previously this function also treated handle === 'wyk' as admin, which
+// was a soft backdoor — if that handle were ever freed (account deletion,
+// role reset, fresh DB), the next signup grabbing it inherits admin
+// powers. Grant admin via `UPDATE users SET role='admin' WHERE id=...`
+// only.
 function isAdminUser(user) {
-  if (!user) return false;
-  if (user.role === 'admin') return true;
-  const h = String(user.handle || user.username || '').toLowerCase().replace(/^@/, '');
-  if (h === 'wyk') return true;
-  return false;
+  return !!(user && user.role === 'admin');
 }
 
 // Normalize the wire-format from the frontend POST into a seller_listings row.

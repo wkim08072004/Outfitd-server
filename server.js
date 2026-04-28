@@ -54,14 +54,49 @@ app.locals.supabase = supabase;
 // Security headers
 app.use(helmet());
 
-  credentials: true
-
-// General rate limit
-// app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
-
-// app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { error: 'Too many login attempts. Please try again later.' } }));lease try again in 15 minutes.' } }));
-// Tighter limit on auth routes
-// app.use('/api/auth/', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
+// ── Rate limits (audit §3.1) ──────────────────────────────────────────────
+// All previously commented out, leaving signup/login/reset/post wide open
+// to credential stuffing and signup spam. Re-enabled with conservative limits.
+// We expose proxy IPs via app.set('trust proxy', 1) above so these key on the
+// real client IP rather than the Render edge.
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, slow down and try again shortly.' },
+});
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,                  // 30 hits per 15 min per IP across the auth surface
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many auth attempts. Please try again in 15 minutes.' },
+});
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,                  // 10 login tries per IP / 15 min — credential stuffing block
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many login attempts. Please try again later.' },
+});
+const passwordResetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,                   // 5 reset attempts per IP per hour
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password reset requests. Try again in an hour.' },
+});
+const postCreateLimiter = rateLimit({
+  windowMs: 60 * 1000,      // 1 minute
+  max: 8,                   // 8 posts per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Posting too quickly. Slow down.' },
+});
+app.use('/api/', generalLimiter);
+// More specific auth limits applied where the routes mount, see below.
 
 // Parse cookies and JSON
 app.use(cookieParser());
@@ -78,7 +113,11 @@ app.use("/api/stripe-connect", require("./routes/stripe-connect"));
 app.use("/api", guestSessionMiddleware);
 
 
-// Routes
+// Routes — auth surface is throttled before the route runs.
+app.use('/api/auth/login',           loginLimiter);
+app.use('/api/auth/forgot-password', passwordResetLimiter);
+app.use('/api/auth/reset-password',  passwordResetLimiter);
+app.use('/api/auth/signup',          authLimiter);
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/battles', require('./routes/battles'));
@@ -132,7 +171,11 @@ app.patch('/api/user/profile', async (req, res) => {
     if (avatar_url !== undefined) updates.avatar_url = avatar_url;
     if (req.body.banner_bg !== undefined) updates.banner_bg = req.body.banner_bg;
     if (req.body.banner_photo !== undefined) updates.banner_photo = req.body.banner_photo;
-    if (req.body.role === 'seller') updates.role = 'seller';
+    // SECURITY (audit §1.5): never accept role from request body. Role is
+    // granted exclusively by an admin — either via direct DB UPDATE or the
+    // server-validated /api/seller/applications/{code}/accept flow. Allowing
+    // a self-PATCH here would let any logged-in user upgrade themselves to
+    // 'seller' and bypass the entire seller-vetting process.
 
     const { error } = await supabase.from('users').update(updates).eq('id', userId);
     if (error) throw error;
@@ -145,7 +188,7 @@ app.patch('/api/user/profile', async (req, res) => {
 
 app.use('/api/user', require('./routes/user'));
 app.use('/api/seller', require('./routes/seller'));
-app.use('/api/posts', require('./routes/posts'));
+app.use('/api/posts', postCreateLimiter, require('./routes/posts'));
 app.use('/api/orders', require('./routes/orders'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/ai', require('./routes/ai'));
