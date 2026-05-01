@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -561,15 +562,52 @@ router.get('/returns', requireAuth, requireSeller, async (req, res) => {
 });
 
 // POST /api/seller/returns/:id/approve — seller approves a pending return.
-// Marks the return approved and the order as 'returned' so it drops out of
-// payout-due lists. Refund-to-buyer is handled separately (Stripe refund),
-// this endpoint just records the seller's decision.
+// Issues a real Stripe refund against the original PaymentIntent, then marks
+// the return approved and the order as 'returned'. If the order's funds were
+// already transferred to the seller's connected account (post return-window
+// release), reverse_transfer:true claws them back; if not, the refund just
+// comes off the platform balance with no transfer reversal needed.
 router.post('/returns/:id/approve', requireAuth, requireSeller, async (req, res) => {
   try {
     const { data: ret } = await supabase
       .from('order_returns').select('*').eq('id', req.params.id).single();
     if (!ret) return res.status(404).json({ error: 'Return not found' });
     if (ret.seller_id !== req.user.id) return res.status(403).json({ error: 'Not your return' });
+    if (ret.status === 'approved') return res.status(400).json({ error: 'Return already approved' });
+
+    const { data: order } = await supabase
+      .from('orders').select('*').eq('id', ret.order_id).single();
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    let refundId = null;
+    if (order.stripe_payment_id) {
+      try {
+        const refund = await stripe.refunds.create({
+          payment_intent: order.stripe_payment_id,
+          reverse_transfer: true,
+          refund_application_fee: true,
+          metadata: {
+            order_id: String(ret.order_id),
+            return_id: String(ret.id),
+            seller_id: String(ret.seller_id),
+          },
+        });
+        refundId = refund.id;
+        console.log('[seller/returns/approve] refund issued', refund.id, 'for PI', order.stripe_payment_id);
+      } catch (stripeErr) {
+        // If the charge was already fully refunded, treat as success and
+        // continue marking the return approved. Any other Stripe error halts.
+        const code = stripeErr && stripeErr.code;
+        if (code === 'charge_already_refunded') {
+          console.warn('[seller/returns/approve] PI', order.stripe_payment_id, 'already refunded, continuing');
+        } else {
+          console.error('[seller/returns/approve] refund failed:', code, stripeErr.message);
+          return res.status(502).json({ error: 'Refund failed: ' + (stripeErr.message || 'Stripe error'), code });
+        }
+      }
+    } else {
+      console.warn('[seller/returns/approve] order', ret.order_id, 'has no stripe_payment_id — skipping refund');
+    }
 
     await supabase.from('order_returns')
       .update({ status: 'approved', approved_at: new Date().toISOString() })
@@ -577,7 +615,8 @@ router.post('/returns/:id/approve', requireAuth, requireSeller, async (req, res)
     await supabase.from('orders')
       .update({ status: 'returned' })
       .eq('id', ret.order_id);
-    res.json({ ok: true });
+
+    res.json({ ok: true, refund_id: refundId });
   } catch (err) {
     console.error('[seller/returns/approve] error:', err);
     res.status(500).json({ error: 'Approve failed' });
