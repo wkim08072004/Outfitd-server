@@ -300,7 +300,8 @@ router.get('/listings/all', async (req, res) => {
     const { data, error } = await supabase
       .from('seller_listings')
       .select(LIST_COLUMNS)
-      .eq('status', 'published')
+      .neq('status', 'deleted')
+      .neq('status', 'sold')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -643,7 +644,7 @@ router.post('/returns/:id/approve', requireAuth, requireSeller, async (req, res)
     if (order.listing_id) {
       const { error: relistErr } = await supabase
         .from('seller_listings')
-        .update({ status: 'published' })
+        .update({ status: 'active' })
         .eq('id', order.listing_id);
       if (relistErr) console.warn('[seller/returns/approve] could not re-list:', relistErr.message);
     }
