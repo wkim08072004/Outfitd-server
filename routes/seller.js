@@ -581,28 +581,51 @@ router.post('/returns/:id/approve', requireAuth, requireSeller, async (req, res)
 
     let refundId = null;
     if (order.stripe_payment_id) {
+      const baseParams = {
+        payment_intent: order.stripe_payment_id,
+        metadata: {
+          order_id: String(ret.order_id),
+          return_id: String(ret.id),
+          seller_id: String(ret.seller_id),
+        },
+      };
+      // Try with reverse_transfer first (handles the case where funds were
+      // already released to the seller's connected account). If the charge
+      // never had an associated transfer (seller not Connect-onboarded yet,
+      // or order still in return-window hold), Stripe rejects with a specific
+      // error — fall back to a plain platform-balance refund.
       try {
-        const refund = await stripe.refunds.create({
-          payment_intent: order.stripe_payment_id,
+        const refund = await stripe.refunds.create(Object.assign({}, baseParams, {
           reverse_transfer: true,
           refund_application_fee: true,
-          metadata: {
-            order_id: String(ret.order_id),
-            return_id: String(ret.id),
-            seller_id: String(ret.seller_id),
-          },
-        });
+        }));
         refundId = refund.id;
         console.log('[seller/returns/approve] refund issued', refund.id, 'for PI', order.stripe_payment_id);
       } catch (stripeErr) {
-        // If the charge was already fully refunded, treat as success and
-        // continue marking the return approved. Any other Stripe error halts.
+        const msg = (stripeErr && stripeErr.message) || '';
         const code = stripeErr && stripeErr.code;
+        const noTransfer = /does not have an associated transfer|no associated transfer/i.test(msg);
+        const noAppFee = /application[_ ]fee/i.test(msg);
         if (code === 'charge_already_refunded') {
           console.warn('[seller/returns/approve] PI', order.stripe_payment_id, 'already refunded, continuing');
+        } else if (noTransfer || noAppFee) {
+          // Retry without reverse_transfer / refund_application_fee.
+          try {
+            const refund = await stripe.refunds.create(baseParams);
+            refundId = refund.id;
+            console.log('[seller/returns/approve] refund issued (no reverse_transfer)', refund.id, 'for PI', order.stripe_payment_id);
+          } catch (retryErr) {
+            const retryCode = retryErr && retryErr.code;
+            if (retryCode === 'charge_already_refunded') {
+              console.warn('[seller/returns/approve] PI', order.stripe_payment_id, 'already refunded, continuing');
+            } else {
+              console.error('[seller/returns/approve] refund retry failed:', retryCode, retryErr.message);
+              return res.status(502).json({ error: 'Refund failed: ' + (retryErr.message || 'Stripe error'), code: retryCode });
+            }
+          }
         } else {
-          console.error('[seller/returns/approve] refund failed:', code, stripeErr.message);
-          return res.status(502).json({ error: 'Refund failed: ' + (stripeErr.message || 'Stripe error'), code });
+          console.error('[seller/returns/approve] refund failed:', code, msg);
+          return res.status(502).json({ error: 'Refund failed: ' + (msg || 'Stripe error'), code });
         }
       }
     } else {
