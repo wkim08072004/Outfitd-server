@@ -89,6 +89,14 @@ router.post('/signup', async (req, res) => {
     // Generate referral code
     const referral_code = 'OFD-' + handle.toUpperCase().replace('@','').slice(0,4) + Math.random().toString(36).slice(2,6).toUpperCase();
 
+    // Soft-launch default: new signups land as email_verified=true while
+    // STRICT_EMAIL_VERIFICATION is off on the server. The verify gate is
+    // wired in across post / publish / buy / cashout but stays inert until
+    // RESEND is set up and the env flag flips on; once that happens, a
+    // post-launch migration can reset email_verified for users who were
+    // never required to confirm.
+    const STRICT_VERIFY = String(process.env.STRICT_EMAIL_VERIFICATION || '').toLowerCase() === 'true';
+
     // Insert user
     const { data: user, error } = await supabase
         .from('users')
@@ -98,7 +106,8 @@ router.post('/signup', async (req, res) => {
             display_name: displayName || handle,
             password_hash,
             referral_code,
-            role: 'user'
+            role: 'user',
+            email_verified: !STRICT_VERIFY,
         })
         .select(SAFE_SELECT)
         .single();
@@ -285,7 +294,12 @@ router.get('/me', async (req, res) => {
 
         if (error || !user) return res.status(401).json({ error: 'User not found' });
 
-        res.json({ user });
+        // Tell the frontend whether the email-verification gate is currently
+        // active server-side. When false, the banner stays hidden so users
+        // aren't nagged about something they can't act on yet.
+        const strictEmailVerification = String(process.env.STRICT_EMAIL_VERIFICATION || '')
+          .toLowerCase() === 'true';
+        res.json({ user, server: { strict_email_verification: strictEmailVerification } });
 
   } catch (err) {
     res.status(401).json({ error: 'Invalid session' });

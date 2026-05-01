@@ -3,20 +3,33 @@
 // cash out. Run AFTER your route's auth middleware (i.e. req.user is
 // already populated from the JWT).
 //
-// Returns 403 with `error: 'email_not_verified'` so the frontend can
-// surface a "Verify your email to continue" CTA without parsing prose.
+// Enforcement is OFF by default and turns on with
+// STRICT_EMAIL_VERIFICATION=true on the server. Until the env flag is
+// set, the middleware passes every request through — the gate is in
+// place but inert, so we can ship before the email-delivery pipeline
+// (Resend / DKIM / domain verification) is finalised.
+//
+// When ON: returns 403 with `error: 'email_not_verified'` so the
+// frontend can surface a "Verify your email to continue" CTA without
+// parsing prose.
 
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
+const STRICT = String(process.env.STRICT_EMAIL_VERIFICATION || '').toLowerCase() === 'true';
+
 // Tiny in-memory cache so a single user spamming gated endpoints doesn't
 // hammer the DB. 60s TTL is short enough that a freshly-verified user
-// sees the unlock within a minute (and the verify flow already returns
-// a fresh user object the frontend can use to bypass).
+// sees the unlock within a minute.
 const VERIFIED_TTL_MS = 60 * 1000;
 const _cache = new Map();
 
 async function requireVerifiedEmail(req, res, next) {
+  // Soft-launch mode: gate is inert until STRICT_EMAIL_VERIFICATION=true
+  // is set on the server. Code paths stay wired so flipping the flag
+  // later activates the gate everywhere at once.
+  if (!STRICT) return next();
+
   const userId = req.user && (req.user.userId || req.user.id);
   if (!userId) {
     return res.status(401).json({ error: 'not_authenticated' });
@@ -30,8 +43,6 @@ async function requireVerifiedEmail(req, res, next) {
     const { data, error } = await supabase
       .from('users').select('email_verified').eq('id', userId).single();
     if (error) {
-      // Fail-open here would let an unverified user act; fail-closed is
-      // safer and the DB lookup almost never errors.
       console.warn('[requireVerifiedEmail] lookup error:', error.message);
       return res.status(500).json({ error: 'verification_check_failed' });
     }
