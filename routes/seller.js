@@ -300,7 +300,7 @@ router.get('/listings/all', async (req, res) => {
     const { data, error } = await supabase
       .from('seller_listings')
       .select(LIST_COLUMNS)
-      .neq('status', 'deleted')
+      .eq('status', 'published')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
