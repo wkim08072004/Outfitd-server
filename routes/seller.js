@@ -505,4 +505,104 @@ router.delete('/listings/:id', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/seller/returns — pending + historical return requests against
+// this seller's orders. Joins order_returns with orders for the buyer-facing
+// item / price / date the seller needs to review the request.
+router.get('/returns', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const sellerId = req.user.id;
+    const { data: rets, error } = await supabase
+      .from('order_returns')
+      .select('id, order_id, buyer_id, seller_id, reason, resolution, notes, item_index, exchange_for, status, created_at, approved_at')
+      .eq('seller_id', sellerId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    if (!rets || !rets.length) return res.json({ returns: [] });
+
+    const orderIds = rets.map(r => r.order_id).filter(Boolean);
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('id, total, gross_total_cents, listing_id, created_at, status, shipping_address')
+      .in('id', orderIds);
+    const ordersById = {};
+    (orders || []).forEach(o => { ordersById[o.id] = o; });
+
+    const listingIds = (orders || []).map(o => o.listing_id).filter(Boolean);
+    const { data: listings } = listingIds.length
+      ? await supabase.from('seller_listings').select('id, title, price').in('id', listingIds)
+      : { data: [] };
+    const listingsById = {};
+    (listings || []).forEach(l => { listingsById[l.id] = l; });
+
+    const shaped = rets.map(r => {
+      const o = ordersById[r.order_id] || {};
+      const listing = (o.listing_id && listingsById[o.listing_id]) || null;
+      const priceCents = o.gross_total_cents || o.total || 0;
+      const priceDollars = priceCents > 1000 ? priceCents / 100 : priceCents;
+      return {
+        id: r.id,
+        orderId: r.order_id,
+        item: listing ? listing.title : 'Item',
+        price: priceDollars,
+        reason: r.reason || '',
+        resolution: r.resolution || 'refund',
+        notes: r.notes || '',
+        exchangeFor: r.exchange_for || '',
+        status: r.status || 'pending',
+        date: r.created_at ? new Date(r.created_at).toLocaleDateString() : '',
+        createdAt: r.created_at,
+      };
+    });
+    res.json({ returns: shaped });
+  } catch (err) {
+    console.error('[seller/returns] error:', err);
+    res.status(500).json({ error: 'Failed to fetch returns' });
+  }
+});
+
+// POST /api/seller/returns/:id/approve — seller approves a pending return.
+// Marks the return approved and the order as 'returned' so it drops out of
+// payout-due lists. Refund-to-buyer is handled separately (Stripe refund),
+// this endpoint just records the seller's decision.
+router.post('/returns/:id/approve', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { data: ret } = await supabase
+      .from('order_returns').select('*').eq('id', req.params.id).single();
+    if (!ret) return res.status(404).json({ error: 'Return not found' });
+    if (ret.seller_id !== req.user.id) return res.status(403).json({ error: 'Not your return' });
+
+    await supabase.from('order_returns')
+      .update({ status: 'approved', approved_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+    await supabase.from('orders')
+      .update({ status: 'returned' })
+      .eq('id', ret.order_id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[seller/returns/approve] error:', err);
+    res.status(500).json({ error: 'Approve failed' });
+  }
+});
+
+// POST /api/seller/returns/:id/deny — seller denies a return request.
+router.post('/returns/:id/deny', requireAuth, requireSeller, async (req, res) => {
+  try {
+    const { data: ret } = await supabase
+      .from('order_returns').select('*').eq('id', req.params.id).single();
+    if (!ret) return res.status(404).json({ error: 'Return not found' });
+    if (ret.seller_id !== req.user.id) return res.status(403).json({ error: 'Not your return' });
+
+    await supabase.from('order_returns')
+      .update({ status: 'denied', approved_at: new Date().toISOString() })
+      .eq('id', req.params.id);
+    await supabase.from('orders')
+      .update({ status: 'paid' })
+      .eq('id', ret.order_id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[seller/returns/deny] error:', err);
+    res.status(500).json({ error: 'Deny failed' });
+  }
+});
+
 module.exports = router;

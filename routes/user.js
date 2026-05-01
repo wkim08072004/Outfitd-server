@@ -5,9 +5,12 @@ const supabase = require('../lib/supabase');
 
 function requireAuth(req, res, next) {
   try {
-    const token = req.cookies.token;
+    const token = req.cookies.token || (req.headers.authorization || '').replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Not logged in' });
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    req.user.userId = decoded.userId || decoded.id || decoded.sub || decoded.user_id;
+    req.user.id = req.user.userId;
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid session' });
@@ -60,19 +63,26 @@ router.get('/', requireAuth, async (req, res) => {
 // POST /api/orders/:id/return
 router.post('/:id/return', requireAuth, async (req, res) => {
   try {
-    const { reason } = req.body;
+    const { reason, resolution, notes, item_index, exchange_for } = req.body;
     const { data: order } = await supabase
       .from('orders').select('*').eq('id', req.params.id).eq('buyer_id', req.user.userId).single();
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
-    // Check 30-day return window
     const orderDate = new Date(order.created_at);
     const now = new Date();
     if ((now - orderDate) > 30 * 24 * 60 * 60 * 1000)
       return res.status(400).json({ error: 'Return window has expired (30 days)' });
 
     const { data, error } = await supabase.from('order_returns').insert({
-      order_id: req.params.id, reason: reason || ''
+      order_id: req.params.id,
+      buyer_id: req.user.userId,
+      seller_id: order.seller_id || null,
+      reason: reason || '',
+      resolution: resolution || 'refund',
+      notes: notes || '',
+      item_index: Number.isFinite(parseInt(item_index)) ? parseInt(item_index) : 0,
+      exchange_for: exchange_for || null,
+      status: 'pending',
     }).select().single();
 
     if (error) throw error;
