@@ -499,6 +499,7 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
     }
 
     const orderIds = [];
+    const soldListingIds = [];
     for (const row of rows) {
       const { data, error } = await supabase
         .from('orders').insert(row).select('id').single();
@@ -509,7 +510,25 @@ router.post('/confirm-payment', requireAuth, async (req, res) => {
           'row:', JSON.stringify(row));
         continue;
       }
-      if (data && data.id) orderIds.push(data.id);
+      if (data && data.id) {
+        orderIds.push(data.id);
+        if (row.listing_id) soldListingIds.push(row.listing_id);
+      }
+    }
+
+    // Mark each purchased listing as 'sold' so it disappears from the shop.
+    // If the buyer later approves a return, the seller-approve handler resets
+    // it to 'published'. We treat each listing as a unique physical item; if
+    // multi-quantity listings are added later this needs a quantity decrement
+    // instead.
+    if (soldListingIds.length) {
+      const { error: soldErr } = await supabase
+        .from('seller_listings')
+        .update({ status: 'sold' })
+        .in('id', soldListingIds);
+      if (soldErr) {
+        console.warn('[confirm-payment] could not mark listings sold:', soldErr.message);
+      }
     }
 
     if (orderIds.length === 0) {

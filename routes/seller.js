@@ -639,6 +639,15 @@ router.post('/returns/:id/approve', requireAuth, requireSeller, async (req, res)
       .update({ status: 'returned' })
       .eq('id', ret.order_id);
 
+    // Re-list the item — the buyer is returning it, so the seller has it back.
+    if (order.listing_id) {
+      const { error: relistErr } = await supabase
+        .from('seller_listings')
+        .update({ status: 'published' })
+        .eq('id', order.listing_id);
+      if (relistErr) console.warn('[seller/returns/approve] could not re-list:', relistErr.message);
+    }
+
     res.json({ ok: true, refund_id: refundId });
   } catch (err) {
     console.error('[seller/returns/approve] error:', err);
