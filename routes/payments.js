@@ -19,7 +19,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
+// Email-verification gates have been retired — login alone authenticates.
+// See server.js / middleware/requireVerifiedEmail.js if you want to add
+// the gate back later; the file is kept as an unused module.
+// const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
 
 // Standard auth middleware shared with the rest of the app — JWT in cookie
 // OR Authorization header. Sets req.user.userId for downstream gates.
@@ -170,7 +173,7 @@ function parseShippingFromDescription(desc) {
 // redemption amount is also validated against the buyer's actual
 // op_balance; "I have a million Style Points" requests are rejected.
 // ═══════════════════════════════════════════════════════════════
-router.post('/create-intent', requireAuth, requireVerifiedEmail, async (req, res) => {
+router.post('/create-intent', requireAuth, async (req, res) => {
   try {
     const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
     const currency = (req.body && req.body.currency) || 'usd';

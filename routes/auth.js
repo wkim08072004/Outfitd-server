@@ -89,15 +89,9 @@ router.post('/signup', async (req, res) => {
     // Generate referral code
     const referral_code = 'OFD-' + handle.toUpperCase().replace('@','').slice(0,4) + Math.random().toString(36).slice(2,6).toUpperCase();
 
-    // Soft-launch default: new signups land as email_verified=true while
-    // STRICT_EMAIL_VERIFICATION is off on the server. The verify gate is
-    // wired in across post / publish / buy / cashout but stays inert until
-    // RESEND is set up and the env flag flips on; once that happens, a
-    // post-launch migration can reset email_verified for users who were
-    // never required to confirm.
-    const STRICT_VERIFY = String(process.env.STRICT_EMAIL_VERIFICATION || '').toLowerCase() === 'true';
-
-    // Insert user
+    // Email verification has been retired as a friction step — logging in
+    // is the only check. Every new account is marked verified at insert so
+    // the column is never the reason a feature is hidden.
     const { data: user, error } = await supabase
         .from('users')
         .insert({
@@ -107,7 +101,7 @@ router.post('/signup', async (req, res) => {
             password_hash,
             referral_code,
             role: 'user',
-            email_verified: !STRICT_VERIFY,
+            email_verified: true,
         })
         .select(SAFE_SELECT)
         .single();

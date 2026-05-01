@@ -24,7 +24,9 @@ function requireAuth(req, res, next) {
   }
 }
 
-const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
+// Email-verification gate retired — login is the only check. Leaving the
+// middleware module on disk for future re-enable.
+// const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
 
 function timeAgo(dateStr) {
   const ms = Date.now() - new Date(dateStr).getTime();
@@ -108,7 +110,7 @@ router.get('/', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 // POST /api/posts — Create a post
 // ═══════════════════════════════════════════════════════════
-router.post('/', requireAuth, requireVerifiedEmail, async (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const { title, style, tags, cost, emoji, frame, photo, bgColor } = req.body;
 

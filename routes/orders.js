@@ -47,7 +47,8 @@ function requireAuth(req, res, next) {
   }
 }
 
-const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
+// Email-verification gate retired — login is the only check.
+// const { requireVerifiedEmail } = require('../middleware/requireVerifiedEmail');
 // GET /api/orders — Fetch user's order history
 router.get('/', requireAuth, async (req, res) => {
   try {
@@ -938,7 +939,7 @@ async function computeSellerPointsBreakdown(sellerId) {
 // cumulative cashouts is always positive in the steady state because
 // every transaction nets Outfitd 5–10% of cash collected.
 // ═══════════════════════════════════════════════════════════════
-router.post('/cashout', requireAuth, requireVerifiedEmail, async (req, res) => {
+router.post('/cashout', requireAuth, async (req, res) => {
   try {
     const sellerId = req.user.userId;
     const requested = Math.max(0, Math.floor(Number(req.body && req.body.points) || 0));
