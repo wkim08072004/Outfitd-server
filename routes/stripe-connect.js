@@ -83,10 +83,17 @@ router.get('/diagnose', async (req, res) => {
     //    activated). Use a clearly-fake email so any accidentally-
     //    created account is identifiable.
     try {
+      // Match the capability shape the real /onboard endpoint requests
+      // (card_payments + transfers) — requesting transfers alone trips a
+      // platform-approval check in live mode and produces a misleading
+      // "Connect not activated" reading even when it actually is.
       const probe = await stripe.accounts.create({
         type: 'express',
         email: 'connect-diagnostic-probe@outfitd.co',
-        capabilities: { transfers: { requested: true } },
+        capabilities: {
+          card_payments: { requested: true },
+          transfers: { requested: true },
+        },
         business_type: 'individual',
       });
       out.accounts_create_check = {
