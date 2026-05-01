@@ -538,7 +538,7 @@ router.get('/returns', requireAuth, requireSeller, async (req, res) => {
       const o = ordersById[r.order_id] || {};
       const listing = (o.listing_id && listingsById[o.listing_id]) || null;
       const priceCents = o.gross_total_cents || o.total || 0;
-      const priceDollars = priceCents > 1000 ? priceCents / 100 : priceCents;
+      const priceDollars = priceCents / 100;
       return {
         id: r.id,
         orderId: r.order_id,
