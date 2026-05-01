@@ -17,7 +17,12 @@ function requireAuth(req, res, next) {
   const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    // Auth tokens are signed with `{ userId }` (see routes/auth.js); normalize
+    // so handlers can safely read req.user.id without silently writing NULL
+    // user_id rows that the DB then rejects.
+    req.user.id = decoded.userId || decoded.id || decoded.sub || decoded.user_id;
     next();
   } catch (e) {
     return res.status(401).json({ error: 'Invalid token' });
@@ -62,7 +67,7 @@ router.get('/', async (req, res) => {
       const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
       if (token) {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        userId = decoded.id;
+        userId = decoded.userId || decoded.id || decoded.sub || decoded.user_id;
       }
     } catch (e) {}
 
