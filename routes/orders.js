@@ -1066,4 +1066,48 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/orders/:id/return — buyer initiates a return on one of their orders.
+// Mounted under /api/orders so the URL the frontend already calls actually hits
+// a route. Defensive on user-id field name since older JWTs in circulation may
+// carry { id } or { userId } or { sub } depending on when they were signed.
+router.post('/:id/return', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.userId || req.user.id || req.user.sub || req.user.user_id;
+    if (!userId) return res.status(401).json({ error: 'Could not resolve user from token' });
+
+    const { reason, resolution, notes, item_index, exchange_for } = req.body;
+    const { data: order } = await supabase
+      .from('orders').select('*').eq('id', req.params.id).eq('buyer_id', userId).single();
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    const orderDate = new Date(order.created_at);
+    const now = new Date();
+    if ((now - orderDate) > 30 * 24 * 60 * 60 * 1000)
+      return res.status(400).json({ error: 'Return window has expired (30 days)' });
+
+    const { data, error } = await supabase.from('order_returns').insert({
+      order_id: req.params.id,
+      buyer_id: userId,
+      seller_id: order.seller_id || null,
+      reason: reason || '',
+      resolution: resolution || 'refund',
+      notes: notes || '',
+      item_index: Number.isFinite(parseInt(item_index)) ? parseInt(item_index) : 0,
+      exchange_for: exchange_for || null,
+      status: 'pending',
+    }).select().single();
+
+    if (error) {
+      console.error('[orders/:id/return] insert failed:', error.code, error.message);
+      throw error;
+    }
+
+    await supabase.from('orders').update({ status: 'return_requested' }).eq('id', req.params.id);
+    res.status(201).json({ ok: true, return_request: data });
+  } catch (err) {
+    console.error('[orders/:id/return] error:', err);
+    res.status(500).json({ error: err.message || 'Return request failed' });
+  }
+});
+
 module.exports = router;
