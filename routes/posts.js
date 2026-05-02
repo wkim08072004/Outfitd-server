@@ -166,7 +166,8 @@ router.post('/', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('POST /api/posts error:', err);
-    res.status(500).json({ error: 'Failed to create post' });
+    const detail = (err && (err.message || err.details || err.hint)) ? String(err.message || err.details || err.hint).slice(0, 160) : '';
+    res.status(500).json({ error: detail ? ('Failed to create post: ' + detail) : 'Failed to create post' });
   }
 });
 
