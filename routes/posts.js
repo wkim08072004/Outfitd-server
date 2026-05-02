@@ -84,11 +84,23 @@ router.get('/', async (req, res) => {
       (savesRes.data || []).forEach(r => { userSaves[r.post_id] = true; });
     }
 
+    // posts table doesn't store avatar — batch-fetch from users so the feed
+    // shows each author's current avatar/photo without a round-trip per row.
+    const avatarByUserId = {};
+    if ((posts || []).length) {
+      const authorIds = Array.from(new Set(posts.map(p => p.user_id).filter(Boolean)));
+      if (authorIds.length) {
+        const { data: authors } = await supabase
+          .from('users').select('id, avatar_url').in('id', authorIds);
+        (authors || []).forEach(u => { avatarByUserId[u.id] = u.avatar_url || null; });
+      }
+    }
+
     const result = (posts || []).map(p => ({
       id: p.id,
       user: p.user_handle,
-      avatar: p.avatar,
-      avatarPhoto: p.avatar_photo,
+      avatar: avatarByUserId[p.user_id] || '👤',
+      avatarPhoto: avatarByUserId[p.user_id] && /^https?:/.test(avatarByUserId[p.user_id]) ? avatarByUserId[p.user_id] : null,
       photo: p.photo,
       title: p.title,
       style: p.style,
@@ -170,11 +182,14 @@ router.post('/', requireAuth, async (req, res) => {
       console.warn('[posts] users lookup threw:', lookupErr);
     }
 
+    // The 'posts' table doesn't have avatar / avatar_photo columns — those are
+    // derived from the users table at read time. Inserting them was failing
+    // with PostgREST schema-cache "column not found" errors. Skip them here
+    // and stitch the user's current avatar into the response so the client
+    // doesn't need a second round trip.
     const { data, error } = await supabase.from('posts').insert({
       user_id: req.user.id,
       user_handle: userHandle,
-      avatar: userAvatar,
-      avatar_photo: null,
       photo: safePhoto,
       title: sanitizedTitle,
       style: style || 'Streetwear',
@@ -194,8 +209,8 @@ router.post('/', requireAuth, async (req, res) => {
       post: {
         id: data.id,
         user: data.user_handle,
-        avatar: data.avatar,
-        avatarPhoto: data.avatar_photo,
+        avatar: userAvatar,
+        avatarPhoto: null,
         photo: data.photo,
         title: data.title,
         style: data.style,
