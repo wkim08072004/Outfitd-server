@@ -7,6 +7,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
+const { moderateBase64 } = require('../utils/imageModeration');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -123,6 +124,34 @@ router.post('/', requireAuth, async (req, res) => {
     const sanitizedTags = (tags || []).map(t => t.replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 30)).filter(Boolean).slice(0, 8);
     const sanitizedCost = Math.max(0, Math.min(parseInt(cost) || 0, 99999));
 
+    // Photo gate. Two valid shapes:
+    //   1. URL from our Supabase storage — already moderated by /api/upload.
+    //   2. Inline base64 data: URL — moderate now (fallback path when upload failed client-side).
+    // Anything else is rejected so external content can't be smuggled in.
+    let safePhoto = null;
+    if (photo) {
+      if (typeof photo !== 'string') {
+        return res.status(400).json({ error: 'Invalid photo' });
+      }
+      if (photo.startsWith('http://') || photo.startsWith('https://')) {
+        const allowedPrefix = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+        if (!allowedPrefix || !photo.startsWith(allowedPrefix)) {
+          return res.status(400).json({ error: 'Photo URL not allowed — upload through /api/upload first' });
+        }
+        safePhoto = photo;
+      } else if (photo.startsWith('data:image/')) {
+        const mod = await moderateBase64(photo);
+        if (mod.safe === false) {
+          console.warn('[posts] blocked user', req.user.id, 'reason:', mod.reason);
+          return res.status(400).json({ error: 'Image blocked: ' + (mod.reason || 'inappropriate content') });
+        }
+        if (mod.skipped) console.warn('[posts] moderation skipped for user', req.user.id, ':', mod.skipped);
+        safePhoto = photo;
+      } else {
+        return res.status(400).json({ error: 'Invalid photo' });
+      }
+    }
+
     // Get user info for denormalized fields
     const { data: userRow } = await supabase.from('users').select('handle, avatar_url').eq('id', req.user.id).single();
 
@@ -131,7 +160,7 @@ router.post('/', requireAuth, async (req, res) => {
       user_handle: userRow?.handle ? ('@' + userRow.handle.replace('@', '')) : req.user.handle,
       avatar: userRow?.avatar_url || '👤',
       avatar_photo: null,
-      photo: photo || null,
+      photo: safePhoto,
       title: sanitizedTitle,
       style: style || 'Streetwear',
       tags: sanitizedTags,
