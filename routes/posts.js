@@ -207,10 +207,15 @@ router.post('/', requireAuth, async (req, res) => {
     let droppedCols = [];
     let data = null, error = null;
     for (let i = 0; i < 8; i++) {
-      const result = await supabase.from('posts').insert(attempt).select().single();
-      data = result.data; error = result.error;
+      // Use plain .select() (array result) instead of .single() — single is
+      // strict about exactly-one-row, and an RLS policy that hides rows from
+      // the inserter's view will make a successful insert look like a failure.
+      const result = await supabase.from('posts').insert(attempt).select();
+      const rows = result.data;
+      error = result.error;
+      data = (rows && rows[0]) || null;
       if (!error && data) break;
-      if (!error) { error = new Error('insert returned no row'); break; }
+      if (!error) { error = new Error('insert returned no row (possible RLS select policy)'); break; }
 
       // PostgREST sends column-not-found in either message/details/hint and
       // can phrase it two ways: schema-cache form or raw Postgres form.
