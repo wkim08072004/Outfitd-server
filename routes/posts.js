@@ -182,12 +182,14 @@ router.post('/', requireAuth, async (req, res) => {
       console.warn('[posts] users lookup threw:', lookupErr);
     }
 
-    // The 'posts' table doesn't have avatar / avatar_photo columns — those are
-    // derived from the users table at read time. Inserting them was failing
-    // with PostgREST schema-cache "column not found" errors. Skip them here
-    // and stitch the user's current avatar into the response so the client
-    // doesn't need a second round trip.
-    const { data, error } = await supabase.from('posts').insert({
+    // The 'posts' table schema has drifted across deploys — different envs are
+    // missing different optional columns (avatar, avatar_photo, bg_color,
+    // frame have all caused PostgREST 'column not found' rejections at one
+    // point or another). Try the full payload first, and on a schema-cache
+    // miss strip the offending column and retry. The required columns
+    // (user_id, user_handle, title, style) stay regardless. Adapts to the
+    // table without needing a manual ALTER for each env.
+    const fullPayload = {
       user_id: req.user.id,
       user_handle: userHandle,
       photo: safePhoto,
@@ -198,11 +200,31 @@ router.post('/', requireAuth, async (req, res) => {
       emoji: emoji || ['👕', '👟'],
       frame: frame || null,
       bg_color: bgColor || null
-    }).select().single();
+    };
+    const REQUIRED = new Set(['user_id', 'user_handle', 'title']);
 
-    if (error) {
+    let attempt = { ...fullPayload };
+    let droppedCols = [];
+    let data = null, error = null;
+    for (let i = 0; i < 6; i++) {
+      const result = await supabase.from('posts').insert(attempt).select().single();
+      data = result.data; error = result.error;
+      if (!error) break;
+      // Match PostgREST's "Could not find the 'X' column of 'posts' in the
+      // schema cache" message and drop that key, unless it's a required column.
+      const m = (error.message || '').match(/find the '([^']+)' column/i);
+      const col = m && m[1];
+      if (col && col in attempt && !REQUIRED.has(col)) {
+        console.warn('[posts] schema missing column "' + col + '" — dropping and retrying');
+        droppedCols.push(col);
+        delete attempt[col];
+        continue;
+      }
       console.error('[posts] insert error for user', req.user.id, ':', error);
       throw error;
+    }
+    if (droppedCols.length) {
+      console.warn('[posts] inserted with dropped columns:', droppedCols.join(','));
     }
 
     res.json({
