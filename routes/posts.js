@@ -206,22 +206,32 @@ router.post('/', requireAuth, async (req, res) => {
     let attempt = { ...fullPayload };
     let droppedCols = [];
     let data = null, error = null;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       const result = await supabase.from('posts').insert(attempt).select().single();
       data = result.data; error = result.error;
-      if (!error) break;
-      // Match PostgREST's "Could not find the 'X' column of 'posts' in the
-      // schema cache" message and drop that key, unless it's a required column.
-      const m = (error.message || '').match(/find the '([^']+)' column/i);
+      if (!error && data) break;
+      if (!error) { error = new Error('insert returned no row'); break; }
+
+      // PostgREST sends column-not-found in either message/details/hint and
+      // can phrase it two ways: schema-cache form or raw Postgres form.
+      const errBlob = String(error.message || '') + ' ' + String(error.details || '') + ' ' + String(error.hint || '');
+      const m = errBlob.match(/find the '([^']+)' column/i)
+             || errBlob.match(/column ['"]?([A-Za-z_][A-Za-z0-9_]*)['"]? .* does not exist/i)
+             || errBlob.match(/'([A-Za-z_][A-Za-z0-9_]*)' column/i);
       const col = m && m[1];
       if (col && col in attempt && !REQUIRED.has(col)) {
         console.warn('[posts] schema missing column "' + col + '" — dropping and retrying');
         droppedCols.push(col);
         delete attempt[col];
+        error = null; data = null;
         continue;
       }
-      console.error('[posts] insert error for user', req.user.id, ':', error);
-      throw error;
+      // Non-recoverable error — break out and let the post-loop guard throw.
+      console.error('[posts] insert non-recoverable error for user', req.user.id, ':', error, 'attempt keys:', Object.keys(attempt));
+      break;
+    }
+    if (!data) {
+      throw error || new Error('insert exhausted retries with no data');
     }
     if (droppedCols.length) {
       console.warn('[posts] inserted with dropped columns:', droppedCols.join(','));
