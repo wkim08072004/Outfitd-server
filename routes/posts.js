@@ -152,13 +152,28 @@ router.post('/', requireAuth, async (req, res) => {
       }
     }
 
-    // Get user info for denormalized fields
-    const { data: userRow } = await supabase.from('users').select('handle, avatar_url').eq('id', req.user.id).single();
+    // Resolve denormalized user fields. Past bug: the JWT only carries userId
+    // (no handle), so when the users-table lookup returned null OR had a null
+    // handle, the original `: req.user.handle` fallback inserted `undefined`
+    // into a NOT NULL column and Postgres rejected the row with a generic
+    // 500 ("Failed to create post"). Always fall back to a stable derived
+    // handle so the insert never carries undefined.
+    let userHandle = '@user' + String(req.user.id || 'anon').replace(/-/g, '').slice(0, 8);
+    let userAvatar = '👤';
+    try {
+      const { data: userRow, error: userErr } = await supabase
+        .from('users').select('handle, avatar_url').eq('id', req.user.id).single();
+      if (userErr) console.warn('[posts] users lookup error:', userErr.message);
+      if (userRow?.handle) userHandle = '@' + userRow.handle.replace('@', '');
+      if (userRow?.avatar_url) userAvatar = userRow.avatar_url;
+    } catch (lookupErr) {
+      console.warn('[posts] users lookup threw:', lookupErr);
+    }
 
     const { data, error } = await supabase.from('posts').insert({
       user_id: req.user.id,
-      user_handle: userRow?.handle ? ('@' + userRow.handle.replace('@', '')) : req.user.handle,
-      avatar: userRow?.avatar_url || '👤',
+      user_handle: userHandle,
+      avatar: userAvatar,
       avatar_photo: null,
       photo: safePhoto,
       title: sanitizedTitle,
@@ -170,7 +185,10 @@ router.post('/', requireAuth, async (req, res) => {
       bg_color: bgColor || null
     }).select().single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('[posts] insert error for user', req.user.id, ':', error);
+      throw error;
+    }
 
     res.json({
       post: {
@@ -195,7 +213,11 @@ router.post('/', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('POST /api/posts error:', err);
-    res.status(500).json({ error: 'Failed to create post' });
+    // Surface a short version of the underlying error so the client can show
+    // something more helpful than a generic "Failed to create post". Avoids
+    // leaking stack traces — just the first ~120 chars of message.
+    const detail = (err && (err.message || err.details || err.hint)) ? String(err.message || err.details || err.hint).slice(0, 120) : '';
+    res.status(500).json({ error: detail ? ('Failed to create post: ' + detail) : 'Failed to create post' });
   }
 });
 
