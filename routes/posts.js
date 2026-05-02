@@ -7,7 +7,6 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
-const { moderateBase64 } = require('../utils/imageModeration');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -84,23 +83,11 @@ router.get('/', async (req, res) => {
       (savesRes.data || []).forEach(r => { userSaves[r.post_id] = true; });
     }
 
-    // posts table doesn't store avatar — batch-fetch from users so the feed
-    // shows each author's current avatar/photo without a round-trip per row.
-    const avatarByUserId = {};
-    if ((posts || []).length) {
-      const authorIds = Array.from(new Set(posts.map(p => p.user_id).filter(Boolean)));
-      if (authorIds.length) {
-        const { data: authors } = await supabase
-          .from('users').select('id, avatar_url').in('id', authorIds);
-        (authors || []).forEach(u => { avatarByUserId[u.id] = u.avatar_url || null; });
-      }
-    }
-
     const result = (posts || []).map(p => ({
       id: p.id,
       user: p.user_handle,
-      avatar: avatarByUserId[p.user_id] || '👤',
-      avatarPhoto: avatarByUserId[p.user_id] && /^https?:/.test(avatarByUserId[p.user_id]) ? avatarByUserId[p.user_id] : null,
+      avatar: p.avatar,
+      avatarPhoto: p.avatar_photo,
       photo: p.photo,
       title: p.title,
       style: p.style,
@@ -136,63 +123,15 @@ router.post('/', requireAuth, async (req, res) => {
     const sanitizedTags = (tags || []).map(t => t.replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 30)).filter(Boolean).slice(0, 8);
     const sanitizedCost = Math.max(0, Math.min(parseInt(cost) || 0, 99999));
 
-    // Photo gate. Two valid shapes:
-    //   1. URL from our Supabase storage — already moderated by /api/upload.
-    //   2. Inline base64 data: URL — moderate now (fallback path when upload failed client-side).
-    // Anything else is rejected so external content can't be smuggled in.
-    let safePhoto = null;
-    if (photo) {
-      if (typeof photo !== 'string') {
-        return res.status(400).json({ error: 'Invalid photo' });
-      }
-      if (photo.startsWith('http://') || photo.startsWith('https://')) {
-        const allowedPrefix = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
-        if (!allowedPrefix || !photo.startsWith(allowedPrefix)) {
-          return res.status(400).json({ error: 'Photo URL not allowed — upload through /api/upload first' });
-        }
-        safePhoto = photo;
-      } else if (photo.startsWith('data:image/')) {
-        const mod = await moderateBase64(photo);
-        if (mod.safe === false) {
-          console.warn('[posts] blocked user', req.user.id, 'reason:', mod.reason);
-          return res.status(400).json({ error: 'Image blocked: ' + (mod.reason || 'inappropriate content') });
-        }
-        if (mod.skipped) console.warn('[posts] moderation skipped for user', req.user.id, ':', mod.skipped);
-        safePhoto = photo;
-      } else {
-        return res.status(400).json({ error: 'Invalid photo' });
-      }
-    }
+    // Get user info for denormalized fields
+    const { data: userRow } = await supabase.from('users').select('handle, avatar_url').eq('id', req.user.id).single();
 
-    // Resolve denormalized user fields. Past bug: the JWT only carries userId
-    // (no handle), so when the users-table lookup returned null OR had a null
-    // handle, the original `: req.user.handle` fallback inserted `undefined`
-    // into a NOT NULL column and Postgres rejected the row with a generic
-    // 500 ("Failed to create post"). Always fall back to a stable derived
-    // handle so the insert never carries undefined.
-    let userHandle = '@user' + String(req.user.id || 'anon').replace(/-/g, '').slice(0, 8);
-    let userAvatar = '👤';
-    try {
-      const { data: userRow, error: userErr } = await supabase
-        .from('users').select('handle, avatar_url').eq('id', req.user.id).single();
-      if (userErr) console.warn('[posts] users lookup error:', userErr.message);
-      if (userRow?.handle) userHandle = '@' + userRow.handle.replace('@', '');
-      if (userRow?.avatar_url) userAvatar = userRow.avatar_url;
-    } catch (lookupErr) {
-      console.warn('[posts] users lookup threw:', lookupErr);
-    }
-
-    // The 'posts' table schema has drifted across deploys — different envs are
-    // missing different optional columns (avatar, avatar_photo, bg_color,
-    // frame have all caused PostgREST 'column not found' rejections at one
-    // point or another). Try the full payload first, and on a schema-cache
-    // miss strip the offending column and retry. The required columns
-    // (user_id, user_handle, title, style) stay regardless. Adapts to the
-    // table without needing a manual ALTER for each env.
-    const fullPayload = {
+    const { data, error } = await supabase.from('posts').insert({
       user_id: req.user.id,
-      user_handle: userHandle,
-      photo: safePhoto,
+      user_handle: userRow?.handle ? ('@' + userRow.handle.replace('@', '')) : req.user.handle,
+      avatar: userRow?.avatar_url || '👤',
+      avatar_photo: null,
+      photo: photo || null,
       title: sanitizedTitle,
       style: style || 'Streetwear',
       tags: sanitizedTags,
@@ -200,54 +139,16 @@ router.post('/', requireAuth, async (req, res) => {
       emoji: emoji || ['👕', '👟'],
       frame: frame || null,
       bg_color: bgColor || null
-    };
-    const REQUIRED = new Set(['user_id', 'user_handle', 'title']);
+    }).select().single();
 
-    let attempt = { ...fullPayload };
-    let droppedCols = [];
-    let data = null, error = null;
-    for (let i = 0; i < 8; i++) {
-      // Use plain .select() (array result) instead of .single() — single is
-      // strict about exactly-one-row, and an RLS policy that hides rows from
-      // the inserter's view will make a successful insert look like a failure.
-      const result = await supabase.from('posts').insert(attempt).select();
-      const rows = result.data;
-      error = result.error;
-      data = (rows && rows[0]) || null;
-      if (!error && data) break;
-      if (!error) { error = new Error('insert returned no row (possible RLS select policy)'); break; }
-
-      // PostgREST sends column-not-found in either message/details/hint and
-      // can phrase it two ways: schema-cache form or raw Postgres form.
-      const errBlob = String(error.message || '') + ' ' + String(error.details || '') + ' ' + String(error.hint || '');
-      const m = errBlob.match(/find the '([^']+)' column/i)
-             || errBlob.match(/column ['"]?([A-Za-z_][A-Za-z0-9_]*)['"]? .* does not exist/i)
-             || errBlob.match(/'([A-Za-z_][A-Za-z0-9_]*)' column/i);
-      const col = m && m[1];
-      if (col && col in attempt && !REQUIRED.has(col)) {
-        console.warn('[posts] schema missing column "' + col + '" — dropping and retrying');
-        droppedCols.push(col);
-        delete attempt[col];
-        error = null; data = null;
-        continue;
-      }
-      // Non-recoverable error — break out and let the post-loop guard throw.
-      console.error('[posts] insert non-recoverable error for user', req.user.id, ':', error, 'attempt keys:', Object.keys(attempt));
-      break;
-    }
-    if (!data) {
-      throw error || new Error('insert exhausted retries with no data');
-    }
-    if (droppedCols.length) {
-      console.warn('[posts] inserted with dropped columns:', droppedCols.join(','));
-    }
+    if (error) throw error;
 
     res.json({
       post: {
         id: data.id,
         user: data.user_handle,
-        avatar: userAvatar,
-        avatarPhoto: null,
+        avatar: data.avatar,
+        avatarPhoto: data.avatar_photo,
         photo: data.photo,
         title: data.title,
         style: data.style,
@@ -265,11 +166,7 @@ router.post('/', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('POST /api/posts error:', err);
-    // Surface a short version of the underlying error so the client can show
-    // something more helpful than a generic "Failed to create post". Avoids
-    // leaking stack traces — just the first ~120 chars of message.
-    const detail = (err && (err.message || err.details || err.hint)) ? String(err.message || err.details || err.hint).slice(0, 120) : '';
-    res.status(500).json({ error: detail ? ('Failed to create post: ' + detail) : 'Failed to create post' });
+    res.status(500).json({ error: 'Failed to create post' });
   }
 });
 

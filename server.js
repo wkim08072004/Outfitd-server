@@ -188,7 +188,7 @@ app.patch('/api/user/profile', async (req, res) => {
 
 app.use('/api/user', require('./routes/user'));
 app.use('/api/seller', require('./routes/seller'));
-app.use('/api/posts', (req, res, next) => req.method === 'POST' ? postCreateLimiter(req, res, next) : next(), require('./routes/posts'));
+app.use('/api/posts', postCreateLimiter, require('./routes/posts'));
 app.use('/api/orders', require('./routes/orders'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/ai', require('./routes/ai'));

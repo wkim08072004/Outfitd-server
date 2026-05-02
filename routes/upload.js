@@ -6,7 +6,6 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
-const { moderateBase64 } = require('../utils/imageModeration');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -46,18 +45,6 @@ router.post('/', requireAuth, async (req, res) => {
     // Max 8MB
     if (buffer.length > 8 * 1024 * 1024) {
       return res.status(400).json({ error: 'File too large — max 8MB' });
-    }
-
-    // Server-side moderation gate. Client-side is a UX hint; this is the
-    // enforcement boundary — bypassing the client (custom request, devtools)
-    // still hits this check before anything reaches Supabase.
-    const mod = await moderateBase64(file);
-    if (mod.safe === false) {
-      console.warn('[upload] blocked user', req.user.id, 'reason:', mod.reason);
-      return res.status(400).json({ error: 'Image blocked: ' + (mod.reason || 'inappropriate content') });
-    }
-    if (mod.skipped) {
-      console.warn('[upload] moderation skipped for user', req.user.id, ':', mod.skipped);
     }
 
     const bucketFolder = folder || 'uploads';
