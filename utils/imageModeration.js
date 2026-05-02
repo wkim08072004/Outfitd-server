@@ -34,16 +34,22 @@ BLOCK: nudity or partial nudity, sexually suggestive poses, explicit content, ha
 Respond with strict JSON only, no prose, no markdown:
 {"safe": true|false, "reason": "short string if false, omit if true"}`;
 
+  // Hard timeout so the moderation call can't blow Render's 15s gateway.
+  // Haiku usually finishes in 1–3s; an 8s ceiling is generous.
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), 8000);
+
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: ctrl.signal,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 120,
         messages: [{
           role: 'user',
@@ -80,8 +86,14 @@ Respond with strict JSON only, no prose, no markdown:
       reason: parsed.safe ? undefined : (parsed.reason || 'inappropriate content'),
     };
   } catch (err) {
+    if (err && err.name === 'AbortError') {
+      console.warn('[moderation] timed out after 8s');
+      return { safe: true, skipped: 'timeout' };
+    }
     console.error('[moderation] error:', err);
     return { safe: true, skipped: 'exception' };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
