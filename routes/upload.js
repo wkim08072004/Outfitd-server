@@ -20,8 +20,13 @@ const supabase = require('../lib/supabase');
 const sniff = require('../lib/moderation/sniff');
 const moderation = require('../lib/moderation');
 
-const MAX_BYTES = 10 * 1024 * 1024; // spec §1: 10 MB hard cap
+// Anthropic's image API caps payloads around 5 MB raw / ~3.75 MB base64.
+// We were silently 400ing on big phone photos and soft-flagging them,
+// which is what let the swastika through. Cap below the API limit so the
+// classifier actually runs on every upload.
+const MAX_BYTES = 5 * 1024 * 1024;
 const GENERIC_REJECT_MESSAGE = 'This image violates our content policy.'; // spec §8: never leak which classifier
+const PENDING_REVIEW_MESSAGE = 'Your photo is being reviewed and will appear shortly once approved.';
 
 function requireAuth(req, res, next) {
   const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
@@ -50,7 +55,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     const buffer = Buffer.from(matches[2], 'base64');
     if (buffer.length > MAX_BYTES) {
-      return res.status(400).json({ error: 'File too large — max 10MB' });
+      return res.status(400).json({ error: 'File too large — max 5MB' });
     }
 
     // Step 1: magic-byte sniff. The data-URL Content-Type prefix is
@@ -89,8 +94,10 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(403).json({ error: GENERIC_REJECT_MESSAGE });
     }
 
-    // Step 4b: store (pass + soft_flag both upload). Soft-flag staying
-    // public until admin acts is documented in lib/moderation/README.
+    // Step 4b: store. Both pass + soft_flag get uploaded so the storage
+    // file exists for either publish (pass) or admin review (soft_flag),
+    // but soft_flag never returns a usable URL — we delete the file and
+    // return 403 so callers can't publish what hasn't passed.
     const bucketFolder = (folder || 'uploads').replace(/[^a-zA-Z0-9_/-]/g, '');
     const fileName = `${bucketFolder}/${uploaderId || 'anon'}_${Date.now()}.${ext}`;
     const { error: uploadErr } = await supabase.storage
@@ -100,13 +107,16 @@ router.post('/', requireAuth, async (req, res) => {
     const { data: urlData } = supabase.storage.from('images').getPublicUrl(fileName);
     const url = urlData.publicUrl;
 
-    // Step 5: audit log + forensic hash record.
+    // Step 5: audit log + forensic hash record. Always written so the
+    // post-side gate (urlIsApproved) can find them.
     await moderation.recordHash({ sha256: sha, uploaderId, imageUrl: url });
     await moderation.recordDecision({ sha256: sha, uploaderId, imageUrl: url, decision });
 
-    // Step 6: soft-flag → queue for admin review. Still return the URL
-    // so existing callers (avatars / banners / listings) keep working;
-    // post creation can opt into the pending UX via queuedForReview.
+    // Step 6: soft_flag → queue + delete the file + return 403. Returning
+    // the URL would let the caller publish a non-passed photo even
+    // though urlIsApproved would later refuse it; cleaner to fail the
+    // upload itself. The flagged_uploads row stays so admins can see
+    // what happened and re-classify by re-uploading.
     if (decision.action === 'soft_flag') {
       await moderation.queueReview({
         sha256: sha,
@@ -114,11 +124,10 @@ router.post('/', requireAuth, async (req, res) => {
         imageUrl: url,
         reasons: decision.reasons,
       });
-      return res.json({
-        url,
-        sha256: sha,
+      await supabase.storage.from('images').remove([fileName]).catch(() => {});
+      return res.status(403).json({
+        error: PENDING_REVIEW_MESSAGE,
         queuedForReview: true,
-        message: 'Your post is being reviewed and will appear shortly.',
       });
     }
 
