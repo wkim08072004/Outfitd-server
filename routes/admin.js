@@ -41,14 +41,28 @@ router.post('/login', async (req, res) => {
 });
 
 // Middleware: require admin
-function requireAdmin(req, res, next) {
+async function requireAdmin(req, res, next) {
   try {
-    const token = req.cookies.token;
+    // Accept either the cookie or an Authorization: Bearer header. The
+    // frontend's api() wrapper sends Bearer because cookies don't survive
+    // every cross-domain hop; the cookie path is kept for the original
+    // /admin/login flow which sets it server-side.
+    const token =
+      (req.cookies && req.cookies.token) ||
+      (req.headers.authorization && req.headers.authorization.replace(/^Bearer\s+/i, ''));
     if (!token) return res.status(401).json({ error: 'Not logged in' });
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'admin')
+    const userId = decoded.userId || decoded.id || decoded.sub;
+    if (!userId) return res.status(401).json({ error: 'Invalid session' });
+    // Login JWTs only carry { userId } — role isn't baked in. Look it up
+    // fresh from the DB so role changes (admin grant / revoke) take
+    // effect on the very next request without forcing a re-login.
+    const { data: user } = await supabase
+      .from('users').select('id, role').eq('id', userId).single();
+    if (!user || user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin only' });
-    req.user = decoded;
+    }
+    req.user = Object.assign({}, decoded, { id: user.id, userId: user.id, role: 'admin' });
     next();
   } catch (err) {
     res.status(401).json({ error: 'Invalid session' });
