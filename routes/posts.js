@@ -47,12 +47,16 @@ function timeAgo(dateStr) {
 // ═══════════════════════════════════════════════════════════
 // GET /api/posts
 // ═══════════════════════════════════════════════════════════
+// Author handle/avatar are looked up from the `users` table on every read
+// rather than denormalized into `posts`. This keeps post inserts immune to
+// PostgREST schema-cache state on those columns and guarantees the feed
+// always shows a current handle/avatar even after profile edits.
 router.get('/', async (req, res) => {
   try {
     const { style, limit = 50, offset = 0 } = req.query;
     let query = supabase
       .from('posts')
-      .select('*')
+      .select('id,user_id,photo,title,style,tags,cost,emoji,frame,bg_color,likes_count,comments_count,created_at')
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
 
@@ -71,6 +75,16 @@ router.get('/', async (req, res) => {
       }
     } catch (e) {}
 
+    const authorIds = Array.from(new Set((posts || []).map(p => p.user_id).filter(Boolean)));
+    let authorMap = {};
+    if (authorIds.length) {
+      const { data: authors } = await supabase
+        .from('users')
+        .select('id, handle, avatar_url')
+        .in('id', authorIds);
+      (authors || []).forEach(a => { authorMap[a.id] = a; });
+    }
+
     let userLikes = {};
     let userSaves = {};
     if (userId && posts.length) {
@@ -83,27 +97,31 @@ router.get('/', async (req, res) => {
       (savesRes.data || []).forEach(r => { userSaves[r.post_id] = true; });
     }
 
-    const result = (posts || []).map(p => ({
-      id: p.id,
-      user: p.user_handle,
-      avatar: p.avatar,
-      avatarPhoto: p.avatar_photo,
-      photo: p.photo,
-      title: p.title,
-      style: p.style,
-      tags: p.tags || [],
-      cost: p.cost,
-      emoji: p.emoji || [],
-      frame: p.frame,
-      bgColor: p.bg_color,
-      likes: p.likes_count || 0,
-      comments: p.comments_count || 0,
-      ts: new Date(p.created_at).getTime(),
-      time: timeAgo(p.created_at),
-      isUserPost: userId ? p.user_id === userId : false,
-      liked: !!userLikes[p.id],
-      saved: !!userSaves[p.id]
-    }));
+    const result = (posts || []).map(p => {
+      const a = authorMap[p.user_id] || {};
+      const handle = a.handle ? ('@' + a.handle.replace(/^@/, '')) : '@user';
+      return {
+        id: p.id,
+        user: handle,
+        avatar: a.avatar_url || '👤',
+        avatarPhoto: a.avatar_url && /^https?:|^data:/i.test(a.avatar_url) ? a.avatar_url : null,
+        photo: p.photo,
+        title: p.title,
+        style: p.style,
+        tags: p.tags || [],
+        cost: p.cost,
+        emoji: p.emoji || [],
+        frame: p.frame,
+        bgColor: p.bg_color,
+        likes: p.likes_count || 0,
+        comments: p.comments_count || 0,
+        ts: new Date(p.created_at).getTime(),
+        time: timeAgo(p.created_at),
+        isUserPost: userId ? p.user_id === userId : false,
+        liked: !!userLikes[p.id],
+        saved: !!userSaves[p.id]
+      };
+    });
 
     res.json({ posts: result });
   } catch (err) {
@@ -123,14 +141,16 @@ router.post('/', requireAuth, async (req, res) => {
     const sanitizedTags = (tags || []).map(t => t.replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 30)).filter(Boolean).slice(0, 8);
     const sanitizedCost = Math.max(0, Math.min(parseInt(cost) || 0, 99999));
 
-    // Get user info for denormalized fields
-    const { data: userRow } = await supabase.from('users').select('handle, avatar_url').eq('id', req.user.id).single();
+    // Look up author for the response shape — handle/avatar are NOT stored on
+    // the post row (see GET / above for rationale).
+    const { data: userRow } = await supabase
+      .from('users')
+      .select('handle, avatar_url')
+      .eq('id', req.user.id)
+      .single();
 
     const { data, error } = await supabase.from('posts').insert({
       user_id: req.user.id,
-      user_handle: userRow?.handle ? ('@' + userRow.handle.replace('@', '')) : req.user.handle,
-      avatar: userRow?.avatar_url || '👤',
-      avatar_photo: null,
       photo: photo || null,
       title: sanitizedTitle,
       style: style || 'Streetwear',
@@ -139,22 +159,26 @@ router.post('/', requireAuth, async (req, res) => {
       emoji: emoji || ['👕', '👟'],
       frame: frame || null,
       bg_color: bgColor || null
-    }).select().single();
+    }).select('id,user_id,photo,title,style,tags,cost,emoji,frame,bg_color,likes_count,comments_count,created_at').single();
 
     if (error) throw error;
+
+    const handle = userRow?.handle ? ('@' + userRow.handle.replace(/^@/, '')) : '@user';
+    const avatarUrl = userRow?.avatar_url || '👤';
+    const isPhotoAvatar = avatarUrl && /^https?:|^data:/i.test(avatarUrl);
 
     res.json({
       post: {
         id: data.id,
-        user: data.user_handle,
-        avatar: data.avatar,
-        avatarPhoto: data.avatar_photo,
+        user: handle,
+        avatar: avatarUrl,
+        avatarPhoto: isPhotoAvatar ? avatarUrl : null,
         photo: data.photo,
         title: data.title,
         style: data.style,
-        tags: data.tags,
+        tags: data.tags || [],
         cost: data.cost,
-        emoji: data.emoji,
+        emoji: data.emoji || [],
         frame: data.frame,
         bgColor: data.bg_color,
         likes: 0,
