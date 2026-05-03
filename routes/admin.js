@@ -198,5 +198,27 @@ router.post('/moderation/:id/reject', requireAdmin, async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────
+// Admin post delete. The user-facing DELETE /api/posts/:id requires
+// ownership; admins need to remove anyone's post (e.g. flagged content),
+// hence a separate route gated by requireAdmin. Cascade-cleans the
+// engagement rows the same way the user delete does.
+// ──────────────────────────────────────────────────────────────────────
+router.delete('/posts/:id', requireAdmin, async (req, res) => {
+  try {
+    const pid = req.params.id;
+    await supabase.from('post_likes').delete().eq('post_id', pid);
+    await supabase.from('post_saves').delete().eq('post_id', pid);
+    await supabase.from('post_comments').delete().eq('post_id', pid);
+    const { error } = await supabase.from('posts').delete().eq('id', pid);
+    if (error) throw error;
+    console.log(JSON.stringify({ evt: 'admin_post_delete', pid, by: req.user.userId }));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('admin DELETE /posts error:', err);
+    res.status(500).json({ error: 'Failed to delete post' });
+  }
+});
+
 module.exports = router;
 
