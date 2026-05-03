@@ -107,5 +107,96 @@ router.get('/consent', async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────
+// Moderation review queue. See lib/moderation/README.md for the full
+// pipeline. All endpoints require an admin JWT (requireAdmin above).
+// ──────────────────────────────────────────────────────────────────────
+
+const moderation = require('../lib/moderation');
+
+// GET /api/admin/moderation/queue — pending soft-flagged uploads.
+router.get('/moderation/queue', requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('flagged_uploads')
+      .select('id, sha256, uploader_id, image_url, reasons, status, created_at')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error) throw error;
+
+    // Hydrate uploader handle so the queue is reviewable at a glance.
+    const uploaderIds = Array.from(new Set((data || []).map(r => r.uploader_id).filter(Boolean)));
+    let userMap = {};
+    if (uploaderIds.length) {
+      const { data: users } = await supabase
+        .from('users').select('id, handle, email').in('id', uploaderIds);
+      (users || []).forEach(u => { userMap[u.id] = u; });
+    }
+    const items = (data || []).map(r => ({
+      id: r.id,
+      sha256: r.sha256,
+      uploader: userMap[r.uploader_id] || null,
+      image_url: r.image_url,
+      reasons: r.reasons || [],
+      created_at: r.created_at,
+    }));
+    res.json({ items });
+  } catch (err) {
+    console.error('moderation queue error:', err);
+    res.status(500).json({ error: 'Failed to load queue' });
+  }
+});
+
+// POST /api/admin/moderation/:id/approve — clear flag, leave image live.
+router.post('/moderation/:id/approve', requireAdmin, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('flagged_uploads')
+      .update({
+        status: 'approved',
+        reviewed_by: req.user.userId,
+        reviewed_at: new Date().toISOString(),
+      })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('moderation approve error:', err);
+    res.status(500).json({ error: 'Failed to approve' });
+  }
+});
+
+// POST /api/admin/moderation/:id/reject — mark rejected AND ban the
+// hash so re-uploads are blocked at step 1 of the pipeline.
+router.post('/moderation/:id/reject', requireAdmin, async (req, res) => {
+  try {
+    const { data: row, error: loadErr } = await supabase
+      .from('flagged_uploads')
+      .select('sha256')
+      .eq('id', req.params.id)
+      .single();
+    if (loadErr) throw loadErr;
+
+    if (row?.sha256) {
+      await moderation.banHash(row.sha256, 'admin_reject', req.user.userId);
+    }
+
+    const { error } = await supabase
+      .from('flagged_uploads')
+      .update({
+        status: 'rejected',
+        reviewed_by: req.user.userId,
+        reviewed_at: new Date().toISOString(),
+      })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('moderation reject error:', err);
+    res.status(500).json({ error: 'Failed to reject' });
+  }
+});
+
 module.exports = router;
 
