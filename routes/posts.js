@@ -85,16 +85,34 @@ router.get('/', async (req, res) => {
       (authors || []).forEach(a => { authorMap[a.id] = a; });
     }
 
+    const postIds = (posts || []).map(p => p.id);
+
+    // Batch-count likes / saves / comments per post so engagement numbers
+    // shown on the feed are always real, regardless of whether the posts
+    // table maintains likes_count / comments_count counter columns.
+    let likeCounts = {};
+    let saveCounts = {};
+    let commentCounts = {};
     let userLikes = {};
     let userSaves = {};
-    if (userId && posts.length) {
-      const postIds = posts.map(p => p.id);
-      const [likesRes, savesRes] = await Promise.all([
-        supabase.from('post_likes').select('post_id').eq('user_id', userId).in('post_id', postIds),
-        supabase.from('post_saves').select('post_id').eq('user_id', userId).in('post_id', postIds)
-      ]);
-      (likesRes.data || []).forEach(r => { userLikes[r.post_id] = true; });
-      (savesRes.data || []).forEach(r => { userSaves[r.post_id] = true; });
+    if (postIds.length) {
+      const queries = [
+        supabase.from('post_likes').select('post_id, user_id').in('post_id', postIds),
+        supabase.from('post_saves').select('post_id, user_id').in('post_id', postIds),
+        supabase.from('post_comments').select('post_id').in('post_id', postIds),
+      ];
+      const [allLikes, allSaves, allComments] = await Promise.all(queries);
+      (allLikes.data || []).forEach(r => {
+        likeCounts[r.post_id] = (likeCounts[r.post_id] || 0) + 1;
+        if (userId && r.user_id === userId) userLikes[r.post_id] = true;
+      });
+      (allSaves.data || []).forEach(r => {
+        saveCounts[r.post_id] = (saveCounts[r.post_id] || 0) + 1;
+        if (userId && r.user_id === userId) userSaves[r.post_id] = true;
+      });
+      (allComments.data || []).forEach(r => {
+        commentCounts[r.post_id] = (commentCounts[r.post_id] || 0) + 1;
+      });
     }
 
     const result = (posts || []).map(p => {
@@ -113,8 +131,9 @@ router.get('/', async (req, res) => {
         emoji: p.emoji || [],
         frame: p.frame,
         bgColor: p.bg_color,
-        likes: p.likes_count || 0,
-        comments: p.comments_count || 0,
+        likes: likeCounts[p.id] || 0,
+        saves: saveCounts[p.id] || 0,
+        comments: commentCounts[p.id] || 0,
         ts: new Date(p.created_at).getTime(),
         time: timeAgo(p.created_at),
         isUserPost: userId ? p.user_id === userId : false,
@@ -182,6 +201,7 @@ router.post('/', requireAuth, async (req, res) => {
         frame: data.frame,
         bgColor: data.bg_color,
         likes: 0,
+        saves: 0,
         comments: 0,
         ts: new Date(data.created_at).getTime(),
         time: 'just now',
