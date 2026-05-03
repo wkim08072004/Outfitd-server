@@ -56,7 +56,7 @@ router.get('/', async (req, res) => {
     const { style, limit = 50, offset = 0 } = req.query;
     let query = supabase
       .from('posts')
-      .select('id,user_id,photo,title,style,tags,cost,emoji,frame,bg_color,likes_count,comments_count,created_at')
+      .select('*')
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
 
@@ -159,7 +159,7 @@ router.post('/', requireAuth, async (req, res) => {
       emoji: emoji || ['👕', '👟'],
       frame: frame || null,
       bg_color: bgColor || null
-    }).select('id,user_id,photo,title,style,tags,cost,emoji,frame,bg_color,likes_count,comments_count,created_at').single();
+    }).select().single();
 
     if (error) throw error;
 
