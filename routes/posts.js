@@ -152,27 +152,13 @@ router.get('/', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 // POST /api/posts — Create a post
 // ═══════════════════════════════════════════════════════════
-const moderation = require('../lib/moderation');
-
+// Per-photo upload moderation was removed at the user's request.
+// Moderation is now reactive: admins remove flagged posts and uploaders
+// can delete their own via the trash button. The moderation lib +
+// banned_image_hashes are kept for future use if we re-introduce a gate.
 router.post('/', requireAuth, async (req, res) => {
   try {
     const { title, style, tags, cost, emoji, frame, photo, bgColor } = req.body;
-
-    // Killer gate: every photo on a new post MUST have a passed
-    // moderation_results row. This catches the case where the upload
-    // route soft-flagged on an upstream classifier error (the swastika
-    // bug), the case where the frontend bypasses /api/upload entirely
-    // and posts an inline base64 data URL, and the case where the URL
-    // points outside our Storage. urlIsApproved fails closed so a DB
-    // hiccup also blocks publish — we'd rather drop a legit post than
-    // publish unmoderated content.
-    if (photo) {
-      const approved = await moderation.urlIsApproved(photo);
-      if (!approved) {
-        console.warn('[posts] rejected — photo not approved by moderation:', String(photo).slice(0, 100));
-        return res.status(403).json({ error: 'This image violates our content policy.' });
-      }
-    }
 
     const sanitizedTitle = (title || 'MY LOOK').replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 80).toUpperCase();
     const sanitizedTags = (tags || []).map(t => t.replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 30)).filter(Boolean).slice(0, 8);
