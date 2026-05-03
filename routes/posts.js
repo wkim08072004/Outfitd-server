@@ -242,6 +242,12 @@ router.delete('/:id', requireAuth, async (req, res) => {
     if (!post || post.user_id !== req.user.id) {
       return res.status(403).json({ error: 'Not your post' });
     }
+    // Cascade-clean engagement rows first — the FKs from post_likes /
+    // post_saves / post_comments aren't ON DELETE CASCADE, so deleting
+    // the post would otherwise fail with a 23503 FK violation.
+    await supabase.from('post_likes').delete().eq('post_id', req.params.id);
+    await supabase.from('post_saves').delete().eq('post_id', req.params.id);
+    await supabase.from('post_comments').delete().eq('post_id', req.params.id);
     const { error } = await supabase.from('posts').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ ok: true });
