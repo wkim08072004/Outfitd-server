@@ -233,6 +233,7 @@ app.get('/api/user/seller-status', async (req, res) => {
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.use('/api/products', require('./routes/products'));
+app.use('/api/trade', require('./routes/trade'));
 // // // Sentry error handler (must be after all routes)
 // // Sentry.setupExpressErrorHandler(app);
 

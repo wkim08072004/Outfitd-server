@@ -12,7 +12,8 @@ const BLOCKED_ROUTES = [
   "/api/orders", "/api/wallet", "/api/wager", "/api/battles/create",
   "/api/battles/accept", "/api/posts/create", "/api/posts/like",
   "/api/posts/comment", "/api/seller", "/api/referral", "/api/redeem",
-  "/api/subscriptions", "/api/settings"
+  "/api/subscriptions", "/api/settings",
+  "/api/trade"
 ];
 
 function guestSessionMiddleware(req, res, next) {
