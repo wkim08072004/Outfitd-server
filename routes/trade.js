@@ -336,7 +336,18 @@ router.get('/discover', requireAuth, async (req, res) => {
   });
 
   if (error) {
-    return res.status(500).json({ error: 'Discover query failed.' });
+    console.error('[trade/discover] RPC failed:', {
+      uid, radius, category, q, lim,
+      pg_code: error.code,
+      pg_message: error.message,
+      pg_details: error.details,
+      pg_hint: error.hint,
+    });
+    return res.status(500).json({
+      error: 'Discover query failed.',
+      detail: error.message || null,
+      code: error.code || null,
+    });
   }
   return res.json({
     radius_miles: radius,

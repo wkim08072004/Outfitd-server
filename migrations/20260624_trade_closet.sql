@@ -142,7 +142,13 @@ RETURNS TABLE (
 DECLARE
   searcher_geog GEOGRAPHY;
 BEGIN
-  SELECT geog INTO searcher_geog FROM users WHERE id = searcher_id;
+  -- Qualify users.id — unqualified `id` collides with the OUT column
+  -- declared in RETURNS TABLE above (PL/pgSQL treats OUT names as
+  -- variables that shadow column references). Without the alias this
+  -- raises 42702: column reference "id" is ambiguous.
+  SELECT u.geog INTO searcher_geog
+  FROM users u
+  WHERE u.id = searcher_id;
   IF searcher_geog IS NULL THEN
     -- Searcher has no location set — return empty so frontend can
     -- prompt for zip / use-my-location.
