@@ -211,6 +211,9 @@ router.post('/closet', requireAuth, async (req, res) => {
     description: b.description ? String(b.description).slice(0, 2000) : null,
     photos,
     status: 'available',
+    // Shared defaults to true (column default) — only override if the
+    // client explicitly opted out at create time.
+    ...(b.shared === false ? { shared: false } : {}),
   };
 
   const { data, error } = await supabase
@@ -243,7 +246,7 @@ router.patch('/closet/:id', requireAuth, async (req, res) => {
   const updates = {};
   const allowed = [
     'title', 'brand', 'category', 'size', 'condition',
-    'color', 'description', 'photos', 'status',
+    'color', 'description', 'photos', 'status', 'shared',
   ];
   for (const k of allowed) {
     if (k in b) {
@@ -256,6 +259,8 @@ router.patch('/closet/:id', requireAuth, async (req, res) => {
           return res.status(400).json({ error: 'Invalid status' });
         }
         updates.status = b.status;
+      } else if (k === 'shared') {
+        updates.shared = !!b.shared;
       } else {
         updates[k] = b[k] == null ? null : String(b[k]).slice(0, 2000);
       }
@@ -869,20 +874,50 @@ router.get('/squads', requireAuth, async (req, res) => {
   }
 
   const ids = memberships.map((m) => m.squad_id);
-  const [squadsRes, countsRes] = await Promise.all([
+  // Item counts: for each squad, sum across its ACTIVE members'
+  // shared+available items. We pull active membership for all squads
+  // in one shot, then a single closet_items lookup keyed by those
+  // owner_ids. The counts are bucketed per squad in JS.
+  const [squadsRes, activeMembersRes] = await Promise.all([
     supabase.from('closet_squads').select('*').in('id', ids),
     supabase
-      .from('closet_squad_items')
-      .select('squad_id')
-      .in('squad_id', ids),
+      .from('closet_squad_members')
+      .select('squad_id, user_id')
+      .in('squad_id', ids)
+      .eq('status', 'active'),
   ]);
   if (squadsRes.error) return res.status(500).json({ error: 'Could not load squads' });
+  if (activeMembersRes.error) return res.status(500).json({ error: 'Could not load squads' });
+
+  const allActiveOwnerIds = [
+    ...new Set((activeMembersRes.data || []).map((m) => m.user_id)),
+  ];
+  let sharedItems = [];
+  if (allActiveOwnerIds.length) {
+    const itemsRes = await supabase
+      .from('closet_items')
+      .select('owner_id')
+      .in('owner_id', allActiveOwnerIds)
+      .eq('status', 'available')
+      .eq('shared', true);
+    if (itemsRes.error) return res.status(500).json({ error: 'Could not load squads' });
+    sharedItems = itemsRes.data || [];
+  }
+  // owner_id → how many shared items they have
+  const itemsByOwner = new Map();
+  for (const it of sharedItems) {
+    itemsByOwner.set(it.owner_id, (itemsByOwner.get(it.owner_id) || 0) + 1);
+  }
+  // squad_id → sum of its active members' shared-item counts
+  const counts = new Map();
+  for (const m of activeMembersRes.data || []) {
+    counts.set(
+      m.squad_id,
+      (counts.get(m.squad_id) || 0) + (itemsByOwner.get(m.user_id) || 0),
+    );
+  }
 
   const squadMap = new Map((squadsRes.data || []).map((s) => [s.id, s]));
-  const counts = new Map();
-  for (const row of countsRes.data || []) {
-    counts.set(row.squad_id, (counts.get(row.squad_id) || 0) + 1);
-  }
 
   const active = [];
   const invited = [];
@@ -950,10 +985,22 @@ router.get('/squads/:id', requireAuth, async (req, res) => {
       );
     });
 
-  const { count: itemCount } = await supabase
-    .from('closet_squad_items')
-    .select('squad_id', { count: 'exact', head: true })
-    .eq('squad_id', id);
+  // item_count = count of (status='available' AND shared=true) closet
+  // items owned by this squad's ACTIVE members. Computed at read time
+  // since there's no longer a join table to count.
+  const activeMemberIds = (members || [])
+    .filter((m) => m.status === 'active')
+    .map((m) => m.user_id);
+  let itemCount = 0;
+  if (activeMemberIds.length) {
+    const ic = await supabase
+      .from('closet_items')
+      .select('id', { count: 'exact', head: true })
+      .in('owner_id', activeMemberIds)
+      .eq('status', 'available')
+      .eq('shared', true);
+    itemCount = ic.count || 0;
+  }
 
   const squadOut = _isAdminish(me)
     ? squad
@@ -1223,12 +1270,9 @@ router.delete('/squads/:id/members/:userId', requireAuth, async (req, res) => {
     }
   }
 
-  await supabase
-    .from('closet_squad_items')
-    .delete()
-    .eq('squad_id', id)
-    .eq('contributor_user_id', targetId);
-
+  // No join-table cleanup needed: squad items are derived from
+  // (active membership ∩ closet_items.shared=true), so removing the
+  // membership row automatically removes their items from the squad.
   const { error } = await supabase
     .from('closet_squad_members')
     .delete()
@@ -1308,83 +1352,14 @@ router.patch('/squads/:id/members/:userId', requireAuth, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────────────
-// POST /api/trade/squads/:id/items   Body: { item_id }
-// ──────────────────────────────────────────────────────────────────────
-router.post('/squads/:id/items', requireAuth, async (req, res) => {
-  const uid = userId(req);
-  if (!uid) return res.status(401).json({ error: 'Not authenticated' });
-
-  const id = req.params.id;
-  const itemId = req.body?.item_id;
-  if (!itemId) return res.status(400).json({ error: 'item_id required' });
-
-  const me = await _membershipOf(id, uid).catch(() => null);
-  if (!me || me.status !== 'active')
-    return res.status(404).json({ error: 'Squad not found' });
-
-  const { data: item, error: itemErr } = await supabase
-    .from('closet_items')
-    .select('id, owner_id, status')
-    .eq('id', itemId)
-    .single();
-  if (itemErr || !item) return res.status(404).json({ error: 'Item not found' });
-  if (item.owner_id !== uid)
-    return res.status(403).json({ error: 'You can only add your own items' });
-  if (item.status !== 'available')
-    return res.status(409).json({ error: 'Item is not available' });
-
-  const { error } = await supabase
-    .from('closet_squad_items')
-    .insert({ squad_id: id, item_id: itemId, contributor_user_id: uid });
-  if (error) {
-    if (error.code === '23505') {
-      return res.status(409).json({ error: 'Item is already in this squad' });
-    }
-    return res.status(500).json({ error: 'Could not add item' });
-  }
-  res.status(201).json({ ok: true });
-});
-
-// ──────────────────────────────────────────────────────────────────────
-// DELETE /api/trade/squads/:id/items/:itemId
-//   Members only — and only their OWN contributions. Owners/admins do
-//   NOT get to pull other members' items per the permissions matrix.
-// ──────────────────────────────────────────────────────────────────────
-router.delete('/squads/:id/items/:itemId', requireAuth, async (req, res) => {
-  const uid = userId(req);
-  if (!uid) return res.status(401).json({ error: 'Not authenticated' });
-
-  const id = req.params.id;
-  const itemId = req.params.itemId;
-  const me = await _membershipOf(id, uid).catch(() => null);
-  if (!me || me.status !== 'active')
-    return res.status(404).json({ error: 'Squad not found' });
-
-  const { data: row, error: rErr } = await supabase
-    .from('closet_squad_items')
-    .select('squad_id, item_id, contributor_user_id')
-    .eq('squad_id', id)
-    .eq('item_id', itemId)
-    .maybeSingle();
-  if (rErr) return res.status(500).json({ error: 'Lookup failed' });
-  if (!row) return res.status(404).json({ error: 'Item not in this squad' });
-  if (row.contributor_user_id !== uid) {
-    return res.status(403).json({ error: 'You can only remove your own contributions' });
-  }
-
-  const { error } = await supabase
-    .from('closet_squad_items')
-    .delete()
-    .eq('squad_id', id)
-    .eq('item_id', itemId);
-  if (error) return res.status(500).json({ error: 'Could not remove item' });
-  res.json({ ok: true });
-});
-
-// ──────────────────────────────────────────────────────────────────────
 // GET /api/trade/squads/:id/items — pooled grid view.
-//   Returns items + per-item owner (handle/display/avatar/city/state)
-//   + viewer→owner distance via JS haversine. Filters to status='available'.
+//   Derived view: closet items owned by this squad's ACTIVE members,
+//   filtered to status='available' AND shared=true. Per-item owner +
+//   viewer→owner distance via JS haversine attached for the card.
+//
+//   There is no longer an explicit POST/DELETE for items in a squad.
+//   Members control inclusion globally via closet_items.shared on
+//   their MY CLOSET cards.
 // ──────────────────────────────────────────────────────────────────────
 router.get('/squads/:id/items', requireAuth, async (req, res) => {
   const uid = userId(req);
@@ -1395,56 +1370,51 @@ router.get('/squads/:id/items', requireAuth, async (req, res) => {
   if (!me || me.status !== 'active')
     return res.status(404).json({ error: 'Squad not found' });
 
-  const { data: joins, error: jErr } = await supabase
-    .from('closet_squad_items')
-    .select('item_id, contributor_user_id, added_at')
+  const { data: activeMembers, error: amErr } = await supabase
+    .from('closet_squad_members')
+    .select('user_id')
     .eq('squad_id', id)
-    .order('added_at', { ascending: false });
-  if (jErr) return res.status(500).json({ error: 'Could not load items' });
-  if (!joins || !joins.length) return res.json({ items: [] });
+    .eq('status', 'active');
+  if (amErr) return res.status(500).json({ error: 'Could not load items' });
+  const ownerIds = (activeMembers || []).map((m) => m.user_id);
+  if (!ownerIds.length) return res.json({ items: [] });
 
-  const itemIds = joins.map((j) => j.item_id);
-  const contribIds = [...new Set(joins.map((j) => j.contributor_user_id))];
   const [itemsRes, ownersRes] = await Promise.all([
     supabase
       .from('closet_items')
       .select('*')
-      .in('id', itemIds)
-      .eq('status', 'available'),
+      .in('owner_id', ownerIds)
+      .eq('status', 'available')
+      .eq('shared', true)
+      .order('created_at', { ascending: false }),
     supabase
       .from('users')
       .select('id, handle, display_name, avatar_url, city, state, lat, lng')
-      .in('id', contribIds),
+      .in('id', ownerIds),
   ]);
   if (itemsRes.error) return res.status(500).json({ error: 'Could not load items' });
   if (ownersRes.error) return res.status(500).json({ error: 'Could not load owners' });
 
-  const itemMap = new Map((itemsRes.data || []).map((i) => [i.id, i]));
   const ownerMap = new Map((ownersRes.data || []).map((u) => [u.id, u]));
-
   const viewerLat = req.user?.lat;
   const viewerLng = req.user?.lng;
 
-  const out = [];
-  for (const j of joins) {
-    const item = itemMap.get(j.item_id);
-    if (!item) continue;
-    const owner = ownerMap.get(j.contributor_user_id);
-    if (!owner) continue;
-    out.push({
+  const out = (itemsRes.data || []).map((item) => {
+    const owner = ownerMap.get(item.owner_id);
+    return {
       ...item,
-      added_at: j.added_at,
-      owner: {
+      added_at: item.created_at,
+      owner: owner ? {
         id: owner.id,
         handle: owner.handle,
         display_name: owner.display_name,
         avatar_url: owner.avatar_url,
         city: owner.city,
         state: owner.state,
-      },
-      distance_miles: milesBetween(viewerLat, viewerLng, owner.lat, owner.lng),
-    });
-  }
+      } : null,
+      distance_miles: owner ? milesBetween(viewerLat, viewerLng, owner.lat, owner.lng) : null,
+    };
+  }).filter((i) => i.owner);
 
   res.json({ items: out });
 });
