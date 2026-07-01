@@ -53,7 +53,7 @@ function timeAgo(dateStr) {
 // always shows a current handle/avatar even after profile edits.
 router.get('/', async (req, res) => {
   try {
-    const { style, limit = 50, offset = 0 } = req.query;
+    const { style, user_id, limit = 50, offset = 0 } = req.query;
     let query = supabase
       .from('posts')
       .select('*')
@@ -61,6 +61,11 @@ router.get('/', async (req, res) => {
       .range(Number(offset), Number(offset) + Number(limit) - 1);
 
     if (style) query = query.eq('style', style);
+    // Profile-view path: fetch just one author's posts. Cheap because
+    // posts.user_id is indexed, and it lets the frontend render a real
+    // grid instead of the client-side "search everything I've cached"
+    // filter that missed remote authors.
+    if (user_id) query = query.eq('user_id', user_id);
 
     const { data: posts, error } = await query;
     if (error) throw error;
