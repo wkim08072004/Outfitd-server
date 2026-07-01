@@ -216,4 +216,43 @@ router.delete('/:id/follow', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// List followers / following for a given user. Kept public so any
+// signed-in viewer can browse. Returned rows are shaped for the UI
+// (id/handle/display_name/avatar_url) so the frontend can render a
+// list and openUserProfile(handle) on click without a second lookup.
+async function _listFollowRelated(req, res, direction) {
+  const uid = req.params.id;
+  const limit = Math.min(parseInt(req.query.limit) || 100, 200);
+  // direction='followers' → who follows :id → follower_id = ?, join user on followee.follower_id
+  // direction='following' → who :id follows  → followee_id via follower_id = :id
+  const selfCol = direction === 'followers' ? 'followee_id' : 'follower_id';
+  const otherCol = direction === 'followers' ? 'follower_id' : 'followee_id';
+
+  const { data: links, error } = await supabase
+    .from('follows')
+    .select(otherCol + ', created_at')
+    .eq(selfCol, uid)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) return res.status(500).json({ error: 'Could not load list' });
+
+  const ids = (links || []).map(l => l[otherCol]).filter(Boolean);
+  if (!ids.length) return res.json({ users: [] });
+
+  const { data: users, error: uerr } = await supabase
+    .from('users')
+    .select('id, handle, display_name, avatar_url')
+    .in('id', ids);
+  if (uerr) return res.status(500).json({ error: 'Could not load users' });
+
+  // Preserve the follows order (most recent first).
+  const byId = {};
+  (users || []).forEach(u => { byId[u.id] = u; });
+  const ordered = ids.map(id => byId[id]).filter(Boolean);
+  res.json({ users: ordered });
+}
+
+router.get('/:id/followers', requireAuth, (req, res) => _listFollowRelated(req, res, 'followers'));
+router.get('/:id/following', requireAuth, (req, res) => _listFollowRelated(req, res, 'following'));
+
 module.exports = router;
