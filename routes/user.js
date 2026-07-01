@@ -154,17 +154,23 @@ router.get('/profile/:handle', optionalAuth, async (req, res) => {
 
   const viewerId = req.user?.id || null;
   // Counts + viewer's follow state in one round-trip each. Using
-  // head:true + count:'exact' so we don't transfer the rows.
-  const [{ count: followers }, { count: following }, viewerLink] = await Promise.all([
+  // head:true + count:'exact' so we don't transfer the rows. Also
+  // check for a pending follow request from viewer → this user so the
+  // client can paint the button as REQUESTED.
+  const [{ count: followers }, { count: following }, viewerLink, pendingReq] = await Promise.all([
     supabase.from('follows').select('follower_id', { count: 'exact', head: true }).eq('followee_id', user.id),
     supabase.from('follows').select('followee_id', { count: 'exact', head: true }).eq('follower_id', user.id),
     viewerId && viewerId !== user.id
       ? supabase.from('follows').select('follower_id').eq('follower_id', viewerId).eq('followee_id', user.id).maybeSingle()
       : Promise.resolve({ data: null }),
+    viewerId && viewerId !== user.id && user.is_private
+      ? supabase.from('follow_requests').select('requester_id').eq('requester_id', viewerId).eq('target_id', user.id).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
 
   const isSelf = viewerId === user.id;
   const isFollowing = !!viewerLink.data;
+  const followRequestPending = !!pendingReq.data;
   // Posts are viewable when the account is public, or the viewer is the
   // owner, or the viewer follows this user. Everything else on the profile
   // (handle, bio, banner, avatar, counts) stays public so follow flows work.
@@ -189,6 +195,7 @@ router.get('/profile/:handle', optionalAuth, async (req, res) => {
     is_following: isFollowing,
     is_self: isSelf,
     can_view_posts: canViewPosts,
+    follow_request_pending: followRequestPending,
   });
 });
 
@@ -199,29 +206,115 @@ router.post('/:id/follow', requireAuth, async (req, res) => {
 
   // Verify the target exists so a typo'd UUID gives a 404 instead of
   // an orphan row blocked by the FK constraint.
-  const { data: t } = await supabase.from('users').select('id').eq('id', target).maybeSingle();
+  const { data: t } = await supabase
+    .from('users').select('id, is_private').eq('id', target).maybeSingle();
   if (!t) return res.status(404).json({ error: 'User not found' });
 
+  // Already following? No-op, return the current accepted state so the
+  // client can settle its UI without a second lookup.
+  const { data: existing } = await supabase
+    .from('follows').select('follower_id')
+    .eq('follower_id', uid).eq('followee_id', target).maybeSingle();
+  if (existing) return res.json({ ok: true, already: true, status: 'accepted' });
+
+  // Private accounts: create a pending request instead of a follow. The
+  // target has to accept via /follow-requests/:id/accept before it turns
+  // into a `follows` row.
+  if (t.is_private) {
+    const { error } = await supabase
+      .from('follow_requests').insert({ requester_id: uid, target_id: target });
+    if (error) {
+      if (error.code === '23505') return res.json({ ok: true, already: true, status: 'pending' });
+      return res.status(500).json({ error: 'Could not send request' });
+    }
+    return res.status(201).json({ ok: true, status: 'pending' });
+  }
+
+  // Public: direct follow.
   const { error } = await supabase
-    .from('follows')
-    .insert({ follower_id: uid, followee_id: target });
+    .from('follows').insert({ follower_id: uid, followee_id: target });
   if (error) {
-    // 23505 = unique_violation. Already following → idempotent success.
-    if (error.code === '23505') return res.json({ ok: true, already: true });
+    if (error.code === '23505') return res.json({ ok: true, already: true, status: 'accepted' });
     return res.status(500).json({ error: 'Could not follow' });
   }
-  res.status(201).json({ ok: true });
+  res.status(201).json({ ok: true, status: 'accepted' });
 });
 
 router.delete('/:id/follow', requireAuth, async (req, res) => {
   const uid = req.user.userId;
   const target = req.params.id;
-  const { error } = await supabase
-    .from('follows')
-    .delete()
-    .eq('follower_id', uid)
-    .eq('followee_id', target);
-  if (error) return res.status(500).json({ error: 'Could not unfollow' });
+  // Cancel both an active follow AND any pending request in one shot —
+  // the same button is used to "unfollow", "cancel request", and just
+  // "make sure I'm not connected", so we clear whichever row exists.
+  const [f, r] = await Promise.all([
+    supabase.from('follows').delete().eq('follower_id', uid).eq('followee_id', target),
+    supabase.from('follow_requests').delete().eq('requester_id', uid).eq('target_id', target),
+  ]);
+  if (f.error || r.error) return res.status(500).json({ error: 'Could not unfollow' });
+  res.json({ ok: true, status: 'none' });
+});
+
+// ── FOLLOW REQUESTS (inbox for private-account owners) ──
+// GET  /api/user/me/follow-requests        → list pending inbound
+// POST /api/user/follow-requests/:requesterId/accept
+// POST /api/user/follow-requests/:requesterId/decline
+//
+// Accept moves the row from follow_requests → follows (in the correct
+// direction: requester follows target). Decline just deletes the row.
+// Both are idempotent — repeat calls return the same shape.
+
+router.get('/me/follow-requests', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const { data: reqs, error } = await supabase
+    .from('follow_requests')
+    .select('requester_id, created_at')
+    .eq('target_id', uid)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) return res.status(500).json({ error: 'Could not load requests' });
+
+  const ids = (reqs || []).map(r => r.requester_id);
+  if (!ids.length) return res.json({ requests: [] });
+
+  const { data: users } = await supabase
+    .from('users').select('id, handle, display_name, avatar_url').in('id', ids);
+  const byId = {};
+  (users || []).forEach(u => { byId[u.id] = u; });
+
+  const out = (reqs || []).map(r => Object.assign({}, byId[r.requester_id] || { id: r.requester_id }, {
+    requested_at: r.created_at,
+  })).filter(x => x.handle);
+  res.json({ requests: out });
+});
+
+router.post('/follow-requests/:requesterId/accept', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const requester = req.params.requesterId;
+  if (uid === requester) return res.status(400).json({ error: 'Invalid request' });
+
+  // Delete the pending row and, if it existed, insert the accepted follow.
+  // Doing it in that order means a duplicate accept is a safe no-op.
+  const { data: pending } = await supabase
+    .from('follow_requests').select('requester_id')
+    .eq('requester_id', requester).eq('target_id', uid).maybeSingle();
+  if (!pending) return res.status(404).json({ error: 'Request not found' });
+
+  await supabase.from('follow_requests').delete()
+    .eq('requester_id', requester).eq('target_id', uid);
+  const { error } = await supabase.from('follows')
+    .insert({ follower_id: requester, followee_id: uid });
+  if (error && error.code !== '23505') {
+    return res.status(500).json({ error: 'Could not accept' });
+  }
+  res.json({ ok: true });
+});
+
+router.post('/follow-requests/:requesterId/decline', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const requester = req.params.requesterId;
+  const { error } = await supabase.from('follow_requests').delete()
+    .eq('requester_id', requester).eq('target_id', uid);
+  if (error) return res.status(500).json({ error: 'Could not decline' });
   res.json({ ok: true });
 });
 
