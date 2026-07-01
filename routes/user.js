@@ -112,4 +112,108 @@ router.post('/returns/:id/approve', requireAuth, requireAdmin, async (req, res) 
   }
 });
 
+// ══════════════════════════════════════════════════════════════════
+// Public profile lookup + follow/unfollow.
+//   GET    /api/user/profile/:handle      → profile, counts, is_following
+//   POST   /api/user/:id/follow           → follow that user
+//   DELETE /api/user/:id/follow           → unfollow
+//
+// Profile is keyed by handle because every place we surface a user in
+// the UI (trade items, shared closet members, posts) gives us the
+// handle but not the UUID. The UUID returns in the response so the
+// frontend can call /:id/follow without a second lookup.
+// ══════════════════════════════════════════════════════════════════
+
+// Lightweight auth that doesn't 401 — used by /profile so a guest
+// could in principle view a profile read-only later. Right now the
+// frontend always sends a token, but optional auth here also gives us
+// is_following=null for unauthenticated callers without branching.
+function optionalAuth(req, _res, next) {
+  try {
+    const token = req.cookies.token || (req.headers.authorization || '').replace('Bearer ', '');
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = { ...decoded, id: decoded.userId || decoded.id || decoded.sub || decoded.user_id };
+      req.user.userId = req.user.id;
+    }
+  } catch (_) { /* ignore — treat as anonymous */ }
+  next();
+}
+
+router.get('/profile/:handle', optionalAuth, async (req, res) => {
+  const raw = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!raw) return res.status(400).json({ error: 'handle required' });
+
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('id, handle, display_name, avatar_url, bio, banner_bg, banner_photo, city, state, role')
+    .eq('handle', raw)
+    .maybeSingle();
+  if (error) return res.status(500).json({ error: 'Profile lookup failed' });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const viewerId = req.user?.id || null;
+  // Counts + viewer's follow state in one round-trip each. Using
+  // head:true + count:'exact' so we don't transfer the rows.
+  const [{ count: followers }, { count: following }, viewerLink] = await Promise.all([
+    supabase.from('follows').select('follower_id', { count: 'exact', head: true }).eq('followee_id', user.id),
+    supabase.from('follows').select('followee_id', { count: 'exact', head: true }).eq('follower_id', user.id),
+    viewerId && viewerId !== user.id
+      ? supabase.from('follows').select('follower_id').eq('follower_id', viewerId).eq('followee_id', user.id).maybeSingle()
+      : Promise.resolve({ data: null }),
+  ]);
+
+  res.json({
+    user: {
+      id: user.id,
+      handle: user.handle,
+      display_name: user.display_name,
+      avatar_url: user.avatar_url,
+      bio: user.bio,
+      banner_bg: user.banner_bg,
+      banner_photo: user.banner_photo,
+      city: user.city,
+      state: user.state,
+      role: user.role,
+    },
+    followers_count: followers || 0,
+    following_count: following || 0,
+    is_following: !!viewerLink.data,
+    is_self: viewerId === user.id,
+  });
+});
+
+router.post('/:id/follow', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const target = req.params.id;
+  if (uid === target) return res.status(400).json({ error: 'Cannot follow yourself' });
+
+  // Verify the target exists so a typo'd UUID gives a 404 instead of
+  // an orphan row blocked by the FK constraint.
+  const { data: t } = await supabase.from('users').select('id').eq('id', target).maybeSingle();
+  if (!t) return res.status(404).json({ error: 'User not found' });
+
+  const { error } = await supabase
+    .from('follows')
+    .insert({ follower_id: uid, followee_id: target });
+  if (error) {
+    // 23505 = unique_violation. Already following → idempotent success.
+    if (error.code === '23505') return res.json({ ok: true, already: true });
+    return res.status(500).json({ error: 'Could not follow' });
+  }
+  res.status(201).json({ ok: true });
+});
+
+router.delete('/:id/follow', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const target = req.params.id;
+  const { error } = await supabase
+    .from('follows')
+    .delete()
+    .eq('follower_id', uid)
+    .eq('followee_id', target);
+  if (error) return res.status(500).json({ error: 'Could not unfollow' });
+  res.json({ ok: true });
+});
+
 module.exports = router;
