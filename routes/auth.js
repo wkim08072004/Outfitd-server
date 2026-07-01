@@ -49,7 +49,23 @@ function getUserIdFromRequest(req) {
 }
 
 // Safe user fields to return (never send password_hash)
-const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_balance, cash_balance, store_credits, subscription, login_streak, referral_code, email_verified, banner_bg, banner_photo, zip, city, state, country, lat, lng, trade_radius_miles, is_private';
+const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_balance, cash_balance, store_credits, subscription, login_streak, referral_code, email_verified, banner_bg, banner_photo, zip, city, state, country, lat, lng, trade_radius_miles, is_private, date_of_birth';
+
+// 18+ policy: shared DOB validator used by /signup and /google (new-user
+// branch). Returns null if OK, or a human-readable error string. Rejects
+// missing / malformed / future dates and anyone under 18.
+function validateAdultDob(input){
+  if(!input) return 'Date of birth is required';
+  const dob = new Date(input);
+  if(isNaN(dob.getTime())) return 'Invalid date of birth';
+  const today = new Date();
+  if(dob > today) return 'Invalid date of birth';
+  let age = today.getUTCFullYear() - dob.getUTCFullYear();
+  const m = today.getUTCMonth() - dob.getUTCMonth();
+  if(m < 0 || (m === 0 && today.getUTCDate() < dob.getUTCDate())) age--;
+  if(age < 18) return 'You must be at least 18 years old to use Outfitd';
+  return null;
+}
 
 // ── SIGNUP ──────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
@@ -60,13 +76,16 @@ router.post('/signup', async (req, res) => {
         // invite codes were trivially bypassable. New users always start as
         // 'user'. Sellers are upgraded by an admin via the seller-application
         // flow + a server-validated invite, never by client claim.
-        const { email, password, handle, displayName } = req.body;
+        const { email, password, handle, displayName, dateOfBirth } = req.body;
 
         if (!email || !password || !handle)
             return res.status(400).json({ error: 'Email, password and handle are required' });
 
         if (password.length < 8)
             return res.status(400).json({ error: 'Password must be at least 8 characters' });
+
+        const dobErr = validateAdultDob(dateOfBirth);
+        if (dobErr) return res.status(400).json({ error: dobErr });
 
         // Check reserved usernames
         const reserved = ['admin','outfitd','support','moderator','system','official','staff','mod'];
@@ -102,6 +121,7 @@ router.post('/signup', async (req, res) => {
             referral_code,
             role: 'user',
             email_verified: true,
+            date_of_birth: dateOfBirth,
         })
         .select(SAFE_SELECT)
         .single();
@@ -224,7 +244,17 @@ router.post('/google', async (req, res) => {
                 }).eq('id', user.id);
             }
         } else {
-            // Create new user
+            // New Google signup — enforce 18+ before creating the row. If
+            // the client didn't send a DOB (first call), return a signal so
+            // it can collect one and retry. If DOB is present but invalid,
+            // return the error message.
+            const { dateOfBirth } = req.body;
+            if (!dateOfBirth) {
+                return res.json({ needsDob: true, email, name: name || null });
+            }
+            const dobErr = validateAdultDob(dateOfBirth);
+            if (dobErr) return res.status(400).json({ error: dobErr });
+
             const handle = email.split('@')[0].toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
             const referral_code = 'OFD-' + handle.toUpperCase().slice(0,4) + Math.random().toString(36).slice(2,6).toUpperCase();
 
@@ -244,7 +274,8 @@ router.post('/google', async (req, res) => {
                     social_id: socialId,
                     social_provider: 'google',
                     email_verified: true,
-                    referral_code
+                    referral_code,
+                    date_of_birth: dateOfBirth,
                 })
                 .select(SAFE_SELECT)
                 .single();

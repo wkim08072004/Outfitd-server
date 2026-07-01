@@ -14,8 +14,8 @@ These rules are enforced in the frontend today; backend code (especially error s
 
 - **"Style Points"** is the user-facing name of the in-app currency. Backend column: `op_balance`. The companion frontend reads `op_balance` into `S.user.stylePoints` and writes `currency: 'op_balance'` to `/api/wallet/award` and `/api/wallet/deduct` for all gameplay deductions/awards. **"Cash Back" is deprecated branding** — don't introduce it in new strings, schemas, or column comments. The frontend completed a `cashback`/`cashOP` → `stylePoints` rename pass; reintroducing the old terminology in API responses, error messages, or column names would force the frontend to re-add legacy aliases.
 - **"Store Credits"** (`store_credits` column) is the redemption target. `routes/wallet.js POST /api/wallet/redeem` converts Style Points → Store Credits at 100:1. Frontend reads `store_credits` into `S.user.storeCredits`. Keep these as distinct columns; do not collapse.
-- **Age gates** (enforced in frontend, backend should not contradict):
-  - 13+ to use the app at all
+- **Age gates** (enforced on both sides):
+  - 18+ to use the app at all — server enforces via `validateAdultDob()` in `routes/auth.js` on both `POST /api/auth/signup` and `POST /api/auth/google` (new-user branch). Column `users.date_of_birth` (migration `20260701_users_18plus.sql`) stores the DOB. Existing pre-migration rows may be NULL and are grandfathered.
   - 18+ to be a seller (seller terms-of-service requires it)
   - 18+ to participate in Style Points wagers or paid tournaments
 - **State geo-blocks** (enforced in frontend): Style Points wagers and tournament entry fees are blocked for users in **UT, HI, WA**. Any backend endpoint that creates a wager or charges a tournament entry fee should treat this as defense-in-depth and re-validate, since client-side checks alone are bypassable.
