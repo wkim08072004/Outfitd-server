@@ -146,7 +146,7 @@ router.get('/profile/:handle', optionalAuth, async (req, res) => {
 
   const { data: user, error } = await supabase
     .from('users')
-    .select('id, handle, display_name, avatar_url, bio, banner_bg, banner_photo, city, state, role')
+    .select('id, handle, display_name, avatar_url, bio, banner_bg, banner_photo, city, state, role, is_private')
     .eq('handle', raw)
     .maybeSingle();
   if (error) return res.status(500).json({ error: 'Profile lookup failed' });
@@ -163,6 +163,13 @@ router.get('/profile/:handle', optionalAuth, async (req, res) => {
       : Promise.resolve({ data: null }),
   ]);
 
+  const isSelf = viewerId === user.id;
+  const isFollowing = !!viewerLink.data;
+  // Posts are viewable when the account is public, or the viewer is the
+  // owner, or the viewer follows this user. Everything else on the profile
+  // (handle, bio, banner, avatar, counts) stays public so follow flows work.
+  const canViewPosts = !user.is_private || isSelf || isFollowing;
+
   res.json({
     user: {
       id: user.id,
@@ -175,11 +182,13 @@ router.get('/profile/:handle', optionalAuth, async (req, res) => {
       city: user.city,
       state: user.state,
       role: user.role,
+      is_private: !!user.is_private,
     },
     followers_count: followers || 0,
     following_count: following || 0,
-    is_following: !!viewerLink.data,
-    is_self: viewerId === user.id,
+    is_following: isFollowing,
+    is_self: isSelf,
+    can_view_posts: canViewPosts,
   });
 });
 

@@ -54,6 +54,40 @@ function timeAgo(dateStr) {
 router.get('/', async (req, res) => {
   try {
     const { style, user_id, limit = 50, offset = 0 } = req.query;
+
+    // Check auth optionally (don't require it). We need viewerId early to
+    // gate private-account visibility below.
+    let userId = null;
+    try {
+      const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userId = decoded.userId || decoded.id || decoded.sub || decoded.user_id;
+      }
+    } catch (e) {}
+
+    // Profile-view privacy gate: if the caller is asking for a specific
+    // author's posts and that author is private, only the owner or an
+    // existing follower is allowed to see them. Non-followers get an
+    // empty list (client renders "This account is private").
+    if (user_id) {
+      const { data: target } = await supabase
+        .from('users').select('id, is_private').eq('id', user_id).maybeSingle();
+      if (target && target.is_private && target.id !== userId) {
+        let allowed = false;
+        if (userId) {
+          const { data: link } = await supabase
+            .from('follows')
+            .select('follower_id')
+            .eq('follower_id', userId)
+            .eq('followee_id', target.id)
+            .maybeSingle();
+          allowed = !!link;
+        }
+        if (!allowed) return res.json({ posts: [], private: true });
+      }
+    }
+
     let query = supabase
       .from('posts')
       .select('*')
@@ -67,18 +101,30 @@ router.get('/', async (req, res) => {
     // filter that missed remote authors.
     if (user_id) query = query.eq('user_id', user_id);
 
-    const { data: posts, error } = await query;
+    let { data: posts, error } = await query;
     if (error) throw error;
 
-    // Check auth optionally (don't require it)
-    let userId = null;
-    try {
-      const token = req.cookies?.token || req.headers.authorization?.replace('Bearer ', '');
-      if (token) {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        userId = decoded.userId || decoded.id || decoded.sub || decoded.user_id;
+    // Feed-level privacy gate: strip out posts by private accounts that
+    // the viewer doesn't follow (and isn't the author of). Only runs when
+    // no user_id filter was given — the profile path is already gated above.
+    if (!user_id && (posts || []).length) {
+      const uniqAuthors = Array.from(new Set(posts.map(p => p.user_id).filter(Boolean)));
+      const { data: authorPrivacy } = await supabase
+        .from('users').select('id, is_private').in('id', uniqAuthors);
+      const privateAuthors = new Set((authorPrivacy || []).filter(a => a.is_private).map(a => a.id));
+      if (privateAuthors.size) {
+        let followed = new Set();
+        if (userId) {
+          const { data: myFollows } = await supabase
+            .from('follows').select('followee_id').eq('follower_id', userId)
+            .in('followee_id', Array.from(privateAuthors));
+          followed = new Set((myFollows || []).map(f => f.followee_id));
+        }
+        posts = posts.filter(p =>
+          !privateAuthors.has(p.user_id) || p.user_id === userId || followed.has(p.user_id)
+        );
       }
-    } catch (e) {}
+    }
 
     const authorIds = Array.from(new Set((posts || []).map(p => p.user_id).filter(Boolean)));
     let authorMap = {};

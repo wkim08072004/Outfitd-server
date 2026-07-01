@@ -171,6 +171,7 @@ app.patch('/api/user/profile', async (req, res) => {
     if (avatar_url !== undefined) updates.avatar_url = avatar_url;
     if (req.body.banner_bg !== undefined) updates.banner_bg = req.body.banner_bg;
     if (req.body.banner_photo !== undefined) updates.banner_photo = req.body.banner_photo;
+    if (req.body.is_private !== undefined) updates.is_private = !!req.body.is_private;
     // SECURITY (audit §1.5): never accept role from request body. Role is
     // granted exclusively by an admin — either via direct DB UPDATE or the
     // server-validated /api/seller/applications/{code}/accept flow. Allowing

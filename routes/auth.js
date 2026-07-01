@@ -49,7 +49,7 @@ function getUserIdFromRequest(req) {
 }
 
 // Safe user fields to return (never send password_hash)
-const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_balance, cash_balance, store_credits, subscription, login_streak, referral_code, email_verified, banner_bg, banner_photo, zip, city, state, country, lat, lng, trade_radius_miles';
+const SAFE_SELECT = 'id, email, handle, display_name, role, avatar_url, bio, op_balance, cash_balance, store_credits, subscription, login_streak, referral_code, email_verified, banner_bg, banner_photo, zip, city, state, country, lat, lng, trade_radius_miles, is_private';
 
 // ── SIGNUP ──────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
