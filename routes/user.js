@@ -318,6 +318,20 @@ router.post('/follow-requests/:requesterId/decline', requireAuth, async (req, re
   res.json({ ok: true });
 });
 
+// Force-remove a follower. Deletes the follows row where the caller is
+// the followee, so the other user is no longer following them. Idempotent
+// (no error if the row was already gone). The removed user isn't notified;
+// they just silently stop seeing new posts.
+router.delete('/me/followers/:followerId', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
+  const follower = req.params.followerId;
+  if (uid === follower) return res.status(400).json({ error: 'Invalid target' });
+  const { error } = await supabase.from('follows').delete()
+    .eq('follower_id', follower).eq('followee_id', uid);
+  if (error) return res.status(500).json({ error: 'Could not remove follower' });
+  res.json({ ok: true });
+});
+
 // List followers / following for a given user. Kept public so any
 // signed-in viewer can browse. Returned rows are shaped for the UI
 // (id/handle/display_name/avatar_url) so the frontend can render a
